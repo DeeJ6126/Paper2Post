@@ -1,0 +1,102 @@
+"""图表提取：从 PDF 中抽取图像并检测图注。
+
+启发式实现：按 xref 去重，渲染为 PNG，按顺序匹配图注。
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from typing import List, Tuple
+
+from paper2post.schemas.paper import ParsedFigure
+
+CAPTION_PATTERN = re.compile(
+    r"(?im)^\s*((?:fig(?:ure)?|table)\.?\s*\d+\s*[a-z]?.*)$"
+)
+LABEL_PATTERN = re.compile(r"(?im)(?:fig(?:ure)?\.?\s*)(\d+[a-z]?)", re.IGNORECASE)
+
+
+def _caption_texts(doc) -> List[str]:
+    full = "\n".join(page.get_text("text") for page in doc)
+    captions: List[str] = []
+    for m in CAPTION_PATTERN.finditer(full):
+        line = m.group(1).strip()
+        # 图注通常较长，过滤太短的行
+        if len(line) >= 8:
+            captions.append(line)
+    return captions
+
+
+def _label_from_caption(caption: str) -> str:
+    m = LABEL_PATTERN.search(caption)
+    if m:
+        return f"Figure {m.group(1)}"
+    return ""
+
+
+def extract_figures(
+    doc,
+    pdf_path: str,
+    figures_dir: str | None = None,
+) -> Tuple[List[ParsedFigure], List[str]]:
+    """抽取图像并渲染。返回 (figures, captions)。"""
+    figures: List[ParsedFigure] = []
+    seen: set = set()
+    page_count = doc.page_count
+
+    for page_index in range(page_count):
+        page = doc[page_index]
+        for img in page.get_images(full=True):
+            xref = img[0]
+            if xref in seen:
+                continue
+            seen.add(xref)
+
+            rects = page.get_image_rects(xref)
+            clip = rects[0] if rects else None
+            pix_bytes: bytes | None = None
+            ext = "png"
+
+            try:
+                raw = doc.extract_image(xref)
+                pix_bytes = raw.get("image")
+                ext = raw.get("ext") or "png"
+            except Exception:
+                pix = page.get_pixmap(clip=clip) if clip is not None else None
+                pix_bytes = pix.tobytes("png") if pix else None
+                ext = "png"
+
+            if not pix_bytes:
+                continue
+
+            out_path = ""
+            if figures_dir:
+                os.makedirs(figures_dir, exist_ok=True)
+                out_path = os.path.join(figures_dir, f"figure_{len(figures) + 1}.{ext}")
+                with open(out_path, "wb") as fh:
+                    fh.write(pix_bytes)
+
+            bbox = list(clip) if clip is not None else []
+            figures.append(
+                ParsedFigure(
+                    index=len(figures),
+                    label=f"Figure {len(figures) + 1}",
+                    path=out_path,
+                    page=page_index + 1,
+                    bbox=[float(x) for x in bbox],
+                    caption="",
+                )
+            )
+
+    captions = _caption_texts(doc)
+
+    # 按顺序为 figure 绑定图注 / 标签（启发式）
+    for idx, fig in enumerate(figures):
+        if idx < len(captions):
+            fig.caption = captions[idx]
+            label = _label_from_caption(captions[idx])
+            if label:
+                fig.label = label
+
+    return figures, captions

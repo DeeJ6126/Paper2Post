@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Workspace-local vendored deps (not in source control)
+vendor/
+
+# Env
+.env
+
+# Outputs
+outputs/
+*.log
+
+# Sample generated artifacts
+examples/sample_paper.pdf
+
+# User PDF inputs
+outputs_test/
+outputs_web/
+data/
+# PyInstaller
+build/
+dist/
+*.spec
+# Desktop outputs
+.paper2post_native/
+# Desktop runtime artifacts
+paper2post_log.txt
+paper2post_url.txt

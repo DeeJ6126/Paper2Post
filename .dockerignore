@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.venv
+vendor
+outputs
+outputs_test
+examples/sample_paper.pdf
+__pycache__
+*.pyc
+*.log
+Dockerfile
+docker-compose.yml
+.dockerignore

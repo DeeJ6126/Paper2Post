@@ -1,0 +1,8 @@
+# Prompt 文件映射（相对工程根目录）
+# 每个 Agent 使用对应 .md 作为 system prompt。
+reader: prompts/reader.md
+storyteller: prompts/storyteller.md
+figure_agent: prompts/figure_agent.md
+writer: prompts/writer.md
+reviewer: prompts/reviewer.md
+editor: prompts/editor.md

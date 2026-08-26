@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Paper2Post — AI Scientific Publishing</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sb-head">
+        <div class="sb-logo">P</div>
+        <div>
+          <div class="sb-name">Paper2Post</div>
+          <div class="sb-tag">AI Scientific Publishing</div>
+        </div>
+      </div>
+      <nav class="sb-nav" id="sbNav">
+        <div class="sb-item active" data-nav="home"><span class="sb-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/></svg></span>Home</div>
+        <div class="sb-item" data-nav="setup"><span class="sb-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg></span>New Paper</div>
+        <div class="sb-item" data-nav="library"><span class="sb-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v14H4zM8 5v14"/></svg></span>Library</div>
+        <div class="sb-item" data-nav="generations"><span class="sb-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M7 9l4 3-4 3M13 15h4"/></svg></span>Generations</div>
+        <div class="sb-item" data-nav="figures"><span class="sb-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5-9 9"/></svg></span>Figures</div>
+        <div class="sb-item" data-nav="evidence"><span class="sb-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg></span>Evidence</div>
+        <div class="sb-item" data-nav="templates"><span class="sb-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 15h8"/></svg></span>Templates</div>
+      </nav>
+      <div class="sb-foot">
+        <div class="sb-item" data-nav="settings"><span class="sb-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 00-.1-1.2l2-1.5-2-3.5-2.3 1a7 7 0 00-2-1.2L14 3h-4l-.6 2.6a7 7 0 00-2 1.2l-2.4-1-2 3.5 2 1.5A7 7 0 005 12a7 7 0 00.1 1.2l-2 1.5 2 3.5 2.4-1a7 7 0 002 1.2L10 21h4l.6-2.6a7 7 0 002-1.2l2.3 1 2-3.5-2-1.5a7 7 0 00.1-1.2z"/></svg></span>Settings</div>
+        <div class="sb-item" data-nav="api"><span class="sb-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13 5l-2 14"/></svg></span>API / Models</div>
+        <div class="sb-item" data-nav="help"><span class="sb-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 015 0c0 1.5-2 1.8-2 3M12 17h.01"/></svg></span>Help</div>
+        <div class="sb-sep"></div>
+        <div class="sb-user"><div class="avatar">R</div><div style="font-size:13px">Researcher</div></div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <div class="main">
+      <div class="topbar">
+        <div class="tb-left" id="tbLeft"><span class="weak">Workspace</span></div>
+        <div class="tb-right">
+          <button class="btn btn-sm" id="langBtn">EN</button>
+          <button class="btn btn-sm">Share</button>
+          <button class="btn btn-primary btn-sm" id="tbExport">Export</button>
+          <button class="icon-btn">···</button>
+        </div>
+      </div>
+      <div class="view" id="view"></div>
+    </div>
+  </div>
+
+  <!-- Modal -->
+  <div class="overlay" id="overlay"><div class="modal" id="modal"></div></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

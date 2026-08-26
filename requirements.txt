@@ -1,0 +1,17 @@
+# Core
+openai>=1.0.0
+pymupdf>=1.24.0
+pydantic>=2.0.0
+PyYAML>=6.0
+python-dotenv>=1.0.0
+
+# 多 Provider（按需使用；安装后可接入对应 API）
+anthropic>=0.50.0
+google-genai>=1.0.0
+
+# 桌面端原生窗口（可选；用于打包 exe/desktop）
+# pywebview>=5.0
+
+# Web (Phase 3, optional)
+# fastapi
+# uvicorn

@@ -1,0 +1,17 @@
+services:
+  paper2post:
+    build: .
+    image: paper2post:latest
+    container_name: paper2post
+    tty: true
+    stdin_open: true
+    volumes:
+      - ./outputs:/app/outputs                # 生成结果落盘到宿主机
+      - ./data:/app/data                      # 把要处理的 PDF 放到本目录
+      - ./config:/app/config                  # 配置可热改，无需重 build
+      - ./prompts:/app/prompts                # Prompt 可热改
+      - ./.env:/app/.env:ro                   # 密钥只读挂载
+    environment:
+      - PYTHONUNBUFFERED=1
+    # 默认：用内置示例论文以 mock 模式跑通一次（无需 API Key）
+    command: ["examples/sample_paper.pdf", "--mock"]

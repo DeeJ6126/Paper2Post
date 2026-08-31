@@ -98,9 +98,11 @@ def markdown_to_html(markdown: str) -> str:
             if not in_list:
                 out.append("<ul>")
                 in_list = True
-            out.append(f"<li>{_inline(re.sub(r'^[-*+]\s+', '', s))}</li>")
+            body = re.sub(r"^[-*+]\s+", "", s)
+            out.append(f"<li>{_inline(body)}</li>")
         elif re.match(r"^\d+[.)]\s+", s):
-            out.append(f"<p>{_inline(re.sub(r'^\d+[.)]\s+', '', s))}</p>")
+            body = re.sub(r"^\d+[.)]\s+", "", s)
+            out.append(f"<p>{_inline(body)}</p>")
         else:
             close_list()
             out.append(f"<p>{_inline(s)}</p>")

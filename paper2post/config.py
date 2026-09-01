@@ -27,12 +27,33 @@ def load_yaml(path) -> Dict[str, Any]:
 
 
 def _load_dotenv(path: Path) -> None:
+    """读取 .env -> os.environ。
+
+    使用 override=True：.env 中的值覆盖同名 shell 环境变量，
+    这样用户更新 .env 即可生效，不必重启服务（实际请求时 load_settings 会重读）。
+    若 python-dotenv 未安装，则用内置解析回退到环境变量。
+    """
+    if not path.exists():
+        return
     try:
         from dotenv import load_dotenv
-    except ImportError:
+
+        load_dotenv(path, override=True)
         return
-    if path.exists():
-        load_dotenv(path)
+    except ImportError:
+        pass
+    # 回退：手写解析 KEY=VALUE（忽略注释与引号），不覆盖已有值
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
 
 
 def _load_all_dotenv() -> None:
@@ -59,19 +80,23 @@ def load_settings(config_path: Optional[str] = None) -> Dict[str, Any]:
             settings[k] = us_settings[k]
 
     # 4) 环境变量覆盖到配置键
+    #    DeepSeek 是当前默认 provider，必须把 DEEPSEEK_API_KEY 也传进去，
+    #    否则 settings.api_key 始终为 None，registry 只能靠 os.environ 兜底。
     for key, target in [
+        ("DEEPSEEK_API_KEY", "api_key"),
         ("OPENAI_API_KEY", "api_key"),
         ("OPENAI_BASE_URL", "base_url"),
         ("OPENAI_MODEL", "model"),
+        ("DEEPSEEK_BASE_URL", "base_url"),
     ]:
         val = os.environ.get(key)
-        if val:
+        if val and not settings.get(target):
             settings[target] = val
 
-    settings.setdefault("api_key", os.environ.get("OPENAI_API_KEY"))
-    settings.setdefault("base_url", os.environ.get("OPENAI_BASE_URL"))
+    settings.setdefault("api_key", os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY"))
+    settings.setdefault("base_url", os.environ.get("DEEPSEEK_BASE_URL") or os.environ.get("OPENAI_BASE_URL"))
     settings.setdefault(
         "model",
-        os.environ.get("OPENAI_MODEL", settings.get("model", "gpt-4o-mini")),
+        os.environ.get("DEEPSEEK_MODEL") or os.environ.get("OPENAI_MODEL") or settings.get("model", "gpt-4o-mini"),
     )
     return settings

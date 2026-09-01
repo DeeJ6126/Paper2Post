@@ -444,9 +444,9 @@ def start_generation(pdf_bytes: bytes, options: dict, model: str) -> dict:
 
     def watchdog():
         import time as _t
-        _t.sleep(120)
+        _t.sleep(600)  # 两段式 Reader + 后续 agent 链路通常 4-6 分钟
         if PROGRESS.get(run_id, {}).get("status") == "running":
-            PROGRESS[run_id] = {"status": "error", "error": "生成超时（超过 120 秒）", "run_id": run_id}
+            PROGRESS[run_id] = {"status": "error", "error": "生成超时（超过 600 秒）", "run_id": run_id}
 
     threading.Thread(target=watchdog, daemon=True).start()
 

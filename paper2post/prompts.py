@@ -27,6 +27,10 @@ class Prompts:
         return self.get("reader")
 
     @property
+    def reader_section(self) -> str:
+        return self.get("reader_section")
+
+    @property
     def storyteller(self) -> str:
         return self.get("storyteller")
 

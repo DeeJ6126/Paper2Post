@@ -2,9 +2,33 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _coerce_to_str(v: Any) -> str:
+    """把 LLM 输出的各种类型都归一成 str。
+
+    真实 LLM 经常把 year 返回成 int (2025)，把 sample_size 返回成 list
+    (["Pancancer38k…","约 8,444 个细胞"])，pydantic 默认严格类型会直接 422。
+    这里统一在 schema 入口做归一化，下游用 string 即可。
+    """
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (int, float)):
+        # year 这种纯数字最常见；其他数字也按字符串化
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        return str(v)
+    if isinstance(v, list):
+        # 列表转成 "；" 分隔的字符串
+        return "；".join(_coerce_to_str(x) for x in v if x is not None and str(x).strip())
+    if isinstance(v, dict):
+        return "；".join(f"{k}：{_coerce_to_str(val)}" for k, val in v.items())
+    return str(v)
 
 
 class Samples(BaseModel):
@@ -12,6 +36,11 @@ class Samples(BaseModel):
     sample_size: str = ""
     tissue: List[str] = Field(default_factory=list)
     dataset: List[str] = Field(default_factory=list)
+
+    @field_validator("sample_size", mode="before")
+    @classmethod
+    def _v_sample_size(cls, v):
+        return _coerce_to_str(v)
 
 
 class Finding(BaseModel):
@@ -41,6 +70,34 @@ class PaperAnalysis(BaseModel):
     innovation: List[str] = Field(default_factory=list)
     limitations: List[str] = Field(default_factory=list)
     authors_conclusion: str = ""
+
+    @field_validator("year", mode="before")
+    @classmethod
+    def _v_year(cls, v):
+        return _coerce_to_str(v)
+
+    @field_validator("main_findings", mode="before")
+    @classmethod
+    def _v_findings(cls, v):
+        # LLM 偶尔把 main_findings 写成字符串列表而非 finding 对象列表，
+        # 把它归一成 [{finding_id, finding, evidence, figure, importance}]
+        if not isinstance(v, list):
+            return []
+        out: List[Dict[str, Any]] = []
+        for i, item in enumerate(v, 1):
+            if isinstance(item, dict):
+                out.append(
+                    {
+                        "finding_id": item.get("finding_id") or f"F{i}",
+                        "finding": _coerce_to_str(item.get("finding", "")),
+                        "evidence": _coerce_to_str(item.get("evidence", "")),
+                        "figure": _coerce_to_str(item.get("figure", "")),
+                        "importance": _coerce_to_str(item.get("importance", "medium")),
+                    }
+                )
+            elif isinstance(item, str):
+                out.append({"finding_id": f"F{i}", "finding": item, "evidence": "", "figure": "", "importance": "medium"})
+        return out
 
     model_config = {"extra": "allow"}
 

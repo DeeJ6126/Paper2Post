@@ -64,8 +64,28 @@ class OpenAIProvider(LLMProvider):
         }
         if max_tokens:
             params["max_tokens"] = max_tokens
-        if json_mode:
-            params["response_format"] = {"type": "json_object"}
+        # 注：这里**不**设 response_format={"type":"json_object"}。
+        # 经验：DeepSeek 的 vision 模型（deepseek-v4-flash-vision-exp）在该硬约束下
+        # 偶发返回空字符串，且对部分输入尺寸高度敏感（<=1KB 经常空响应）。
+        # 改为依赖 system prompt 中的"输出为合法 JSON"软约束，generate_json 内的
+        # parse_json() 会自动剥离 markdown 围栏并截取 { ... } 段。
 
-        resp = self.client.chat.completions.create(**params)
-        return resp.choices[0].message.content or ""
+        # 经验：vision 模型首次冷启动会偶发返回空字符串（包括 chat 长输出场景）。
+        # 这里在 provider 层加重试，让所有上层调用（chat / generate_json）都受益。
+        import time as _t
+        last_err: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                resp = self.client.chat.completions.create(**params)
+                text = resp.choices[0].message.content or ""
+                if text.strip():
+                    return text
+                raise ValueError("empty response")
+            except Exception as exc:
+                last_err = exc
+                if attempt < 3:
+                    _t.sleep(0.6 * attempt)
+                    continue
+                break
+        # 三次都空或失败，返回空串；上层会兜底
+        return ""

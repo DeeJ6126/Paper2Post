@@ -79,18 +79,43 @@ def generate_json(
     draft: Any,
     temperature: float = 0.7,
     max_tokens: Optional[int] = None,
+    max_retries: int = 3,
 ) -> Any:
-    """调用 Provider 请求 JSON；mock 模式或解析失败时回退到 draft。"""
+    """调用 Provider 请求 JSON；mock 模式或解析失败时回退到 draft。
+
+    经验：DeepSeek vision 模型（deepseek-v4-flash-vision-exp）首次冷启动调用
+    偶发返回空字符串，重试一次通常就能拿到正常响应。max_retries 控制重试次数，
+    默认 3 次（首次 + 2 次重试）。空响应与 JSON 解析失败都触发重试。
+    """
     if getattr(provider, "is_mock", False):
         return draft
-    text = provider.generate(
-        system=system,
-        user=user,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        json_mode=True,
+    import time as _t
+    last_text = ""
+    last_err: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            text = provider.generate(
+                system=system,
+                user=user,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=True,
+            )
+            last_text = text or ""
+            if not last_text.strip():
+                raise ValueError("empty response")
+            return parse_json(last_text)
+        except Exception as exc:
+            last_err = exc
+            if attempt < max_retries:
+                _t.sleep(0.6 * attempt)  # 0.6s, 1.2s backoff
+                continue
+            break
+    import sys as _sys
+    _sys.stderr.write(
+        f"[generate_json] gave up after {max_retries} attempts "
+        f"(provider={getattr(provider, 'name', '?')}, err={last_err}); "
+        f"system_len={len(system)}, user_len={len(user)}, raw_head={last_text[:200]!r}\n"
     )
-    try:
-        return parse_json(text)
-    except Exception:
-        return draft
+    _sys.stderr.flush()
+    return draft

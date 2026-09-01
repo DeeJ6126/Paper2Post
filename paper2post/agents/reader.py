@@ -18,8 +18,9 @@ from .base import BaseAgent
 
 # 单节正文字数上限：vision 模型在 ~1.5KB 中文/英文文本输入下能稳定返回 JSON
 SECTION_TEXT_LIMIT = 1500
-# 单节抽取输出上限：要点 JSON 极小，给 800 tokens 足够
-SECTION_MAX_TOKENS = 800
+# 单节抽取输出上限：要点 JSON 极小，给 1500 tokens 够 vision 紧凑输出，
+# 也够 pro 这种啰嗦模型完整生成（之前 800 会从 1300+ 字符处截断）。
+SECTION_MAX_TOKENS = 1500
 # 总聚合输入上限：vision 上下文里塞 ≤6KB 比较稳
 AGG_INPUT_LIMIT = 6000
 # 一次最多抽取多少节：限制 vision 模型下的总耗时

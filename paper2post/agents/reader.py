@@ -22,10 +22,14 @@ SECTION_TEXT_LIMIT = 1500
 SECTION_MAX_TOKENS = 800
 # 总聚合输入上限：vision 上下文里塞 ≤6KB 比较稳
 AGG_INPUT_LIMIT = 6000
+# 一次最多抽取多少节：限制 vision 模型下的总耗时
+MAX_SECTIONS = 3
 
 
 class ReaderAgent(BaseAgent):
     """读取论文，输出结构化 paper_analysis.json。不直接写推文。"""
+
+    MAX_SECTIONS = MAX_SECTIONS
 
     def __init__(
         self,
@@ -88,9 +92,14 @@ class ReaderAgent(BaseAgent):
         return data
 
     def _extract_all_sections(self, paper: ParsedPaper) -> List[Dict[str, Any]]:
-        """逐节调一次 LLM；任何单节失败不影响后续。"""
+        """逐节调一次 LLM；任何单节失败不影响后续。
+
+        长论文只取前 MAX_SECTIONS 节：13 节 × 30s × 3 retries 在 vision 模型下要 20 分钟，
+        6 节大约 5 分钟，能拿到够用的覆盖。References/Appendix 通常信息密度低、优先舍弃。
+        """
         notes: List[Dict[str, Any]] = []
-        for i, sec in enumerate(paper.sections):
+        sections_to_process = paper.sections[: self.MAX_SECTIONS]
+        for i, sec in enumerate(sections_to_process):
             note = self._extract_section(i + 1, sec.heading, sec.text)
             notes.append({"section_index": i + 1, "heading": sec.heading, **note})
         return notes
@@ -129,21 +138,25 @@ class ReaderAgent(BaseAgent):
         section_notes = self._extract_all_sections(paper)
 
         # Step 2: 合成
-        user = self._build_aggregate_user(paper, section_notes)
-        data = generate_json(
-            self.llm,
-            system=self.prompts.reader,
-            user=user,
-            draft=draft.model_dump(),
-            temperature=self.temperature(),
-            max_tokens=self.max_tokens(),
-        )
-
-        try:
-            return PaperAnalysis(**data)
-        except Exception:
-            # 聚合失败时，用 section_notes 构造一个降级 PaperAnalysis
-            return self._degrade_from_notes(paper, section_notes)
+        #   注：vision 模型在 6KB+ 输入下偶发返回空响应且重试成本高。聚合 prompt
+        #   含 6+ section notes 时通常超过这个阈值。改为：默认走 _degrade_from_notes
+        #   直接用 section_notes 拼出 PaperAnalysis；如果 LLM 真的不依赖 vision
+        #   （flash/pro），可以传 aggregate=True 启用二次合成。
+        if self.config.get("aggregate", False):
+            user = self._build_aggregate_user(paper, section_notes)
+            data = generate_json(
+                self.llm,
+                system=self.prompts.reader,
+                user=user,
+                draft=draft.model_dump(),
+                temperature=self.temperature(),
+                max_tokens=self.max_tokens(),
+            )
+            try:
+                return PaperAnalysis(**data)
+            except Exception:
+                pass
+        return self._degrade_from_notes(paper, section_notes)
 
     def _degrade_from_notes(self, paper: ParsedPaper, notes: List[Dict[str, Any]]) -> PaperAnalysis:
         """当 LLM 聚合返回的 JSON 不满足 schema 时，从 section notes 直接拼一个可用版。"""

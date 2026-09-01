@@ -34,9 +34,11 @@ class ReviewerAgent(BaseAgent):
         draft = self._draft()
         user = self.dump(
             {
-                "article": article,
+                # article 截到 3KB 防止 vision 模型空响应。Reviewer 重点核验
+                # 前 1-2 段（hook、why important、findings），再长边际收益低。
+                "article": article[:3000],
                 "evidence": evidence.model_dump(),
-                "full_text": paper.full_text[:20000],
+                "paper_summary": (paper.abstract or "")[:1500],
             }
         )
         data = generate_json(

@@ -49,9 +49,12 @@ class EditorAgent(BaseAgent):
         if self.llm.is_mock:
             return draft
 
+        # 截断 article 到 4KB 避免 vision 模型 6KB+ 阈值空响应
+        safe_article = (article or "")[:4000]
+
         user = self.dump(
             {
-                "draft_article": article,
+                "draft_article": safe_article,
                 "fact_check": factcheck.model_dump(),
                 "options": options,
             }
@@ -62,7 +65,19 @@ class EditorAgent(BaseAgent):
             temperature=float(self.config.get("editor_temperature", 0.3)),
             max_tokens=self.max_tokens(),
         )
+        # 兜底：vision 模型在 6KB+ 输入下经常返回空字符串。
+        # Editor 只是润色/排版，原稿丢失远比润色失败更糟，
+        # 因此 LLM 失败/空响应时退回到原稿 + 原 HTML。
+        if not (text or "").strip():
+            return draft
         markdown = self._light_clean(text)
+        # 再次兜底：LLM 偶尔返回的"无法编辑"类元消息（以 "无法" / "I cannot" 等开头）
+        if re.match(r"^[\s#]*(" + r"|".join([
+            "无法", "I cannot", "I can\u2019t", "I am unable",
+            "Sorry", "I don't have", "I do not have", "I'm sorry",
+            "（请", "Draft is empty",
+        ]) + r")", markdown, re.IGNORECASE):
+            return draft
         return {
             "markdown": markdown,
             "html": markdown_to_html(markdown),

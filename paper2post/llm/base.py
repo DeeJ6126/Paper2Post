@@ -57,18 +57,39 @@ FENCE = chr(96) * 3  # triple backtick markdown fence
 
 
 def parse_json(text: str) -> Any:
-    """从 LLM 返回文本中提取 JSON，容忍 markdown 代码块围栏。"""
+    """从 LLM 返回文本中提取 JSON，容忍 markdown 代码块围栏、尾部说明。
+
+    经验：vision 模型常常在 JSON 数组后追加 "以下是..." 这种说明文字，
+    `json.loads` 会报 "Extra data" 错；改用 `json.JSONDecoder().raw_decode`
+    只取第一段合法 JSON，忽略尾部。
+    """
     t = (text or "").strip()
     if t.startswith(FENCE):
         t = t.strip(chr(96))
         if t.lower().startswith("json"):
             t = t[4:]
         t = t.strip()
-    start = t.find("{")
-    end = t.rfind("}")
-    if start != -1 and end != -1:
-        t = t[start : end + 1]
-    return json.loads(t)
+    # 先尝试 raw_decode：能解析首段 JSON 并忽略尾部
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(t)
+        return obj
+    except Exception:
+        pass
+    # 回退：找最外层 { ... } 或 [ ... ]
+    start_brace = t.find("{")
+    start_bracket = t.find("[")
+    if start_brace == -1:
+        start = start_bracket
+    elif start_bracket == -1:
+        start = start_brace
+    else:
+        start = min(start_brace, start_bracket)
+    end_brace = t.rfind("}")
+    end_bracket = t.rfind("]")
+    end = max(end_brace, end_bracket)
+    if start == -1 or end == -1 or end <= start:
+        raise
+    return json.loads(t[start : end + 1])
 
 
 def generate_json(

@@ -12,8 +12,15 @@ from paper2post.schemas.figure import FigureAnalysis
 
 from .base import BaseAgent
 
+# 喂给 Figure Agent 的图上限。AlphaFold3 这种大论文会有 100+ 张图，全喂进去
+# 会让 vision 模型超时（prompt 超 50KB）。取前 30 张够用，超出的图在 _draft
+# 里仍按 low importance 给出，保证 figure_items 列表完整。
+MAX_FIGURES_FOR_LLM = 30
+
 
 class FigureAgent(BaseAgent):
+    MAX_FIGURES_FOR_LLM = MAX_FIGURES_FOR_LLM
+
     def __init__(
         self,
         llm: LLMProvider,
@@ -47,11 +54,13 @@ class FigureAgent(BaseAgent):
         article_type: str,
     ) -> List[FigureAnalysis]:
         draft = self._draft(paper)
+        # 只把前 N 张喂给 LLM，超出的图仍出现在 draft（带 low importance）里。
+        figs_for_llm = paper.figures[: self.MAX_FIGURES_FOR_LLM]
         user = self.dump(
             {
                 "figures": [
                     {"label": f.label, "caption": f.caption, "page": f.page}
-                    for f in paper.figures
+                    for f in figs_for_llm
                 ],
                 "storyline": storyline.model_dump(),
                 "article_type": article_type,
@@ -61,7 +70,7 @@ class FigureAgent(BaseAgent):
             self.llm,
             system=self.prompts.figure_agent,
             user=user,
-            draft=[x.model_dump() for x in draft],
+            draft=[x.model_dump() for x in draft[: self.MAX_FIGURES_FOR_LLM]],
             temperature=self.temperature(),
             max_tokens=self.max_tokens(),
         )
@@ -76,4 +85,17 @@ class FigureAgent(BaseAgent):
 
         if not items:
             return draft
-        return [FigureAnalysis(**x) for x in items if isinstance(x, dict)]
+        # 把 LLM 给的 items 截到 MAX_FIGURES_FOR_LLM，剩余的图用 draft 兜底
+        from_paper_labels = {f.label for f in paper.figures}
+        seen_labels = set()
+        merged: List[FigureAnalysis] = []
+        for x in items:
+            if not isinstance(x, dict):
+                continue
+            fa = FigureAnalysis(**x)
+            seen_labels.add(fa.figure)
+            merged.append(fa)
+        for d in draft[len(merged):]:
+            if d.figure not in seen_labels:
+                merged.append(d)
+        return merged

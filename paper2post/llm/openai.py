@@ -38,8 +38,8 @@ class OpenAIProvider(LLMProvider):
 
         kwargs: Dict[str, Any] = {
             "api_key": api_key,
-            "timeout": float(cfg.get("timeout", 60.0)),
-            "max_retries": int(cfg.get("max_retries", 1)),
+            "timeout": float(cfg.get("timeout", 30.0)),
+            "max_retries": 0,  # 由本类 generate() 统一做重试，避免双重 retry 把单次延迟放大
         }
         if base_url:
             kwargs["base_url"] = base_url
@@ -72,6 +72,8 @@ class OpenAIProvider(LLMProvider):
 
         # 经验：vision 模型首次冷启动会偶发返回空字符串（包括 chat 长输出场景）。
         # 这里在 provider 层加重试，让所有上层调用（chat / generate_json）都受益。
+        # 单次 HTTP 超时 30s（上面 client 配的），重试 3 次 + 0.6/1.2s backoff，
+        # 最坏 3 × 30 + 1.8 ≈ 92s 一次调用。
         import time as _t
         last_err: Exception | None = None
         for attempt in range(1, 4):

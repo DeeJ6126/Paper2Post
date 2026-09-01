@@ -3,7 +3,7 @@
   var state = {
     lang: "zh",
     view: "home", file: null, result: null,
-    config: { article_type: "deep_review", audience: "Biology Graduate", length: "2500", language: "中文", style: "Academic Popularization", provider: "deepseek", model: "deepseek-v4-flash-vision-exp" },
+    config: { article_type: "deep_review", audience: "Biology Graduate", length: "2500", language: "中文", style: "Academic Popularization", provider: "deepseek", model: "deepseek-v4-flash" },
     paperFiles: [], selClaim: null, selFig: null, activeRun: null, resultsByRun: {}, generations: [],
     activeWorkspaceTab: { paper: 0, editor: 0, inspector: 0 },
     dismissed: [], accepted: [],
@@ -174,7 +174,7 @@
     show("processing");
     var list = document.getElementById("stepList"); var items = list ? Array.prototype.slice.call(list.children) : [];
     var activity = document.getElementById("activity");
-    var cfg = { article_type: state.config.article_type, audience: state.config.audience, length: state.config.length, language: state.config.language === "中文" ? "zh-CN" : "en", style: state.config.style, model: state.config.model || "deepseek-v4-flash-vision-exp" };
+    var cfg = { article_type: state.config.article_type, audience: state.config.audience, length: state.config.length, language: state.config.language === "中文" ? "zh-CN" : "en", style: state.config.style, model: state.config.model || "deepseek-v4-flash" };
     var qs = Object.keys(cfg).map(function (k) { return encodeURIComponent(k) + "=" + encodeURIComponent(cfg[k]); }).join("&");
     function setSteps(step) { items.forEach(function (it, i) { it.className = (i < step ? "step done" : (i === step ? "step active" : "step")); }); }
     function logMsg(label) { if (activity) { var d = h("div"); d.appendChild(h("div", "weak", new Date().toLocaleTimeString())); d.appendChild(h("div", null, label)); activity.appendChild(d); } }
@@ -362,7 +362,7 @@
 
   function renderEvidence(v) { var c = container(v); c.appendChild(h("h1", "h1", t("证据", "Evidence"))); var ev = (state.result && state.result.evidence && state.result.evidence.evidence) || []; if (!ev.length) { c.appendChild(h("h2", "h2 mt16", t("选择一篇论文查看证据。", "Select a paper to view grounded evidence."))); return; } ev.forEach(function (e, i) { var b = h("div", "card mt12"); b.appendChild(h("div", "cap", "Claim 0" + (i + 1))); b.appendChild(h("div", "h3", "“" + (e.claim || "") + "”")); b.appendChild(h("div", "weak mt8", t("依据", "Supported by") + ": " + (e.source_section || "Results") + " · Paragraph 8")); b.appendChild(h("div", "weak", t("图表", "Figure") + ": " + (e.figure || "—"))); b.appendChild(h("div", "badge green mt8", t("置信度", "Confidence") + " " + Math.round((e.confidence || 0) * 100) + "% · " + t("已验证", "Verified"))); c.appendChild(b); }); }
 
-  var DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash-vision-exp";
+  var DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
   var CUSTOM_MODEL = "__custom__";
 
   function sel(opts, val) { var s = h("select", "select"); opts.forEach(function (o) { var op = h("option", null, o); op.value = o; s.appendChild(op); }); s.value = val || opts[0]; return s; }

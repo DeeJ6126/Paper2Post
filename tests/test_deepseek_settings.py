@@ -44,12 +44,12 @@ def isolated_server_settings():
 
 
 def test_catalog_and_default():
-    assert registry.DEEPSEEK_DEFAULT_MODEL == "deepseek-v4-flash-vision-exp"
+    assert registry.DEEPSEEK_DEFAULT_MODEL == "deepseek-v4-flash"
     assert registry.DEEPSEEK_BASE_URL == "https://api.deepseek.com"
     assert registry.DEEPSEEK_MODELS == [
-        "deepseek-v4-flash-vision-exp",
         "deepseek-v4-flash",
         "deepseek-v4-pro",
+        "deepseek-v4-flash-vision-exp",
     ]
 
 
@@ -57,7 +57,7 @@ def test_models_info_is_deepseek_only_and_secret_free():
     with isolated_server_settings():
         info = server.get_models_info()
         assert info["provider"] == "deepseek"
-        assert info["model"] == "deepseek-v4-flash-vision-exp"
+        assert info["model"] == "deepseek-v4-flash"
         assert info["models"] == registry.DEEPSEEK_MODELS
         assert info["allow_custom_model"] is True
         assert info["has_api_key"] is False
@@ -104,7 +104,7 @@ def test_save_models_rejects_empty_model():
 def test_frontend_uses_deepseek_model_selector_without_provider_controls():
     source = (ROOT / "webapp" / "static" / "app.js").read_text(encoding="utf-8")
     assert 'provider: "deepseek"' in source
-    assert 'model: "deepseek-v4-flash-vision-exp"' in source
+    assert 'model: "deepseek-v4-flash"' in source
     assert "__custom__" in source
     assert "var PROVIDERS" not in source
     assert 't("服务商", "Provider")' not in source

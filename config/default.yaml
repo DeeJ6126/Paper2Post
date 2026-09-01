@@ -4,7 +4,7 @@
 # 当前 Web 版本固定使用 DeepSeek
 provider: deepseek
 
-model: deepseek-v4-flash-vision-exp
+model: deepseek-v4-flash
 base_url: https://api.deepseek.com
 temperature: 0.7
 max_tokens: 4096

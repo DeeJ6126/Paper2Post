@@ -8,11 +8,12 @@ from typing import Any, Dict, Optional
 from .base import LLMProvider, LLMError
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash-vision-exp"
+# 文本优先：vision 在 6KB+ 输入下空响应。flash 是当前 Pipeline 真正稳定的模型。
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
 DEEPSEEK_MODELS = [
     DEEPSEEK_DEFAULT_MODEL,
-    "deepseek-v4-flash",
     "deepseek-v4-pro",
+    "deepseek-v4-flash-vision-exp",
 ]
 
 # 走 OpenAI 兼容协议（base_url + model）即可接入的 Provider

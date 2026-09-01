@@ -404,16 +404,52 @@
 
   function renderApi(v) {
     var c = container(v); c.appendChild(h("h1", "h1", t("API / 模型", "API / Models")));
-    c.appendChild(h("p", "muted mt8", t("配置 DeepSeek 密钥与模型；密钥仅保存在本机 .env。", "Configure DeepSeek credentials and model. The key stays in the local .env file.")));
+    c.appendChild(h("p", "muted mt8", t("选择服务商并配置 API Key；密钥仅保存在本机 .env。", "Pick a provider and configure its API key. Keys stay in the local .env file.")));
     fetch("/api/models").then(function (r) { return r.json(); }).then(function (m) {
+      var providers = (m.providers || []).slice();
+      if (!providers.length) providers = [{ name: "deepseek", alias: "DeepSeek", env_key: "DEEPSEEK_API_KEY" }];
       var card = h("div", "card mt16"); c.appendChild(card); var grid = h("div", "grid g2"); card.appendChild(grid);
-      var picker = modelPicker(m.models, m.model || DEFAULT_DEEPSEEK_MODEL); grid.appendChild(fld(t("DeepSeek 模型", "DeepSeek Model"), picker.element));
+      // provider 下拉
+      var providerSel = h("select", "select");
+      providers.forEach(function (p) { var op = h("option", null, p.alias + " (" + p.env_key + ")"); op.value = p.name; providerSel.appendChild(op); });
+      providerSel.value = m.provider || "deepseek";
+      grid.appendChild(fld(t("服务商", "Provider"), providerSel));
+      // model 下拉（依赖当前 provider）
+      var modelHost = h("div"); grid.appendChild(fld(t("模型", "Model"), modelHost));
+      function repaintModels(currentModel) {
+        modelHost.innerHTML = "";
+        var picker = modelPicker(m.models, currentModel || m.model || DEFAULT_DEEPSEEK_MODEL);
+        modelHost.appendChild(picker.element);
+        modelHost.__picker = picker;
+      }
+      repaintModels(m.model);
+      // key 输入
       var ak = h("input", "input"); ak.type = "password"; ak.placeholder = m.has_api_key ? "••••••••" : "sk-…"; grid.appendChild(fld(t("API Key", "API Key"), ak));
       var status = h("div", "badge mt8 " + (m.has_api_key ? "green" : "red"), (m.has_api_key ? t("已配置密钥", "Key configured") : t("未配置密钥", "No key configured")));
       card.appendChild(status);
+      // 切换 provider：刷新 model 列表与 key 状态
+      providerSel.onchange = function () {
+        var name = providerSel.value;
+        var meta = providers.filter(function (p) { return p.name === name; })[0] || providers[0];
+        // 重新拉一次，因为后端不同 provider 的 model 列表可能不同
+        fetch("/api/models").then(function (r) { return r.json(); }).then(function (mm) {
+          // 注：/api/models 永远返回当前 settings 选中的 provider 的 model 列表，
+          // 切换时只能根据 provider 名字静态选一组。后端要返回所有 provider 的 models 才能正确切换。
+          // 简化处理：直接调用 save_models(provider=name) 触发后端切换 settings，
+          // 然后下一次进入此页会拿到新 provider 的 model 列表。
+          var tmp = meta.env_key;
+          ak.placeholder = "sk-…"; status.className = "badge mt8 red"; status.textContent = t("未配置密钥", "No key configured");
+          // 用一个临时 GET 拿切换后真正的 model 列表：直接调后端切换并读回
+          // 折中：把 provider 写回 settings.json（不传 key/model），再读
+          fetch("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: name, model: m.model || DEFAULT_DEEPSEEK_MODEL }) }).then(function (r2) { return r2.json(); }).then(function (rr) {
+            if (rr.ok) { m = rr; repaintModels(rr.model); status.className = "badge mt8 " + (rr.has_api_key ? "green" : "red"); status.textContent = rr.has_api_key ? t("已配置密钥", "Key configured") : t("未配置密钥", "No key configured"); ak.placeholder = rr.has_api_key ? "••••••••" : "sk-…"; }
+          });
+        });
+      };
       var save = h("button", "btn btn-primary mt24", t("保存", "Save")); save.style.cssText = "width:100%;justify-content:center;padding:12px";
       save.onclick = function () {
-        var vals = { model: picker.value(), api_key: ak.value };
+        var picker = modelHost.__picker;
+        var vals = { provider: providerSel.value, model: picker ? picker.value() : "", api_key: ak.value };
         if (!vals.model) { toast(t("请输入模型 ID", "Enter a model ID")); return; }
         Object.keys(vals).forEach(function (k) { if (!vals[k]) delete vals[k]; });
         fetch("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(vals) }).then(function (r) { return r.json(); }).then(function (res) { if (res.ok) { toast(t("已保存", "Saved") + " · " + res.provider + " / " + res.model); state.config.provider = res.provider; state.config.model = res.model; render(); } else toast(t("保存失败", "Save failed")); });

@@ -62,7 +62,11 @@ def test_models_info_is_deepseek_only_and_secret_free():
         assert info["allow_custom_model"] is True
         assert info["has_api_key"] is False
         assert "api_key" not in info
-        assert "providers" not in info
+        # 现在 info 暴露 providers 列表（用于 UI 切换），但不能泄漏任何 key
+        assert "providers" in info
+        for p in info["providers"]:
+            assert "api_key" not in p
+            assert "base_url" not in p
         assert "base_url" not in info
 
 
@@ -70,7 +74,7 @@ def test_save_models_writes_key_without_returning_it_and_preserves_empty_key():
     with isolated_server_settings() as root:
         secret = "ds-test-secret"
         result = server.save_models(
-            {"provider": "openai", "base_url": "https://invalid.example", "model": "deepseek-v4-pro", "api_key": secret}
+            {"model": "deepseek-v4-pro", "api_key": secret}
         )
         env_path = root / ".env"
         assert env_path.exists()
@@ -91,6 +95,36 @@ def test_save_models_writes_key_without_returning_it_and_preserves_empty_key():
         }
 
 
+def test_save_models_supports_moonshot_provider():
+    """新增的 Moonshot/Kimi 通道：写 MOONSHOT_API_KEY 而不是 DEEPSEEK_API_KEY。"""
+    with isolated_server_settings() as root:
+        result = server.save_models(
+            {"provider": "moonshot", "model": "moonshot-v1-8k", "api_key": "kimi-test-secret"}
+        )
+        env_path = root / ".env"
+        assert env_path.exists()
+        assert env_path.read_text(encoding="utf-8") == "MOONSHOT_API_KEY=kimi-test-secret\n"
+        assert result["provider"] == "moonshot"
+        assert result["model"] == "moonshot-v1-8k"
+        assert "moonshot-v1-8k" in result["models"]
+        assert "api_key" not in result
+        # 切换 provider 时 base_url 跟着变
+        settings = json.loads(server.SETTINGS_PATH.read_text(encoding="utf-8"))
+        assert settings["provider"] == "moonshot"
+        assert settings["base_url"] == "https://api.moonshot.cn/v1"
+
+
+def test_save_models_rejects_unknown_provider():
+    """未知 provider 应当被拒绝，防止脏数据落盘。"""
+    with isolated_server_settings():
+        try:
+            server.save_models({"provider": "nonsense", "model": "x", "api_key": "x"})
+        except ValueError as exc:
+            assert "provider" in str(exc).lower()
+        else:
+            raise AssertionError("unknown provider must be rejected")
+
+
 def test_save_models_rejects_empty_model():
     with isolated_server_settings():
         try:
@@ -101,15 +135,19 @@ def test_save_models_rejects_empty_model():
             raise AssertionError("empty model must be rejected")
 
 
-def test_frontend_uses_deepseek_model_selector_without_provider_controls():
+def test_frontend_uses_deepseek_model_selector_and_exposes_provider_switch():
     source = (ROOT / "webapp" / "static" / "app.js").read_text(encoding="utf-8")
+    # 默认仍是 deepseek
     assert 'provider: "deepseek"' in source
     assert 'model: "deepseek-v4-flash"' in source
+    # 自定义模型支持
     assert "__custom__" in source
-    assert "var PROVIDERS" not in source
-    assert 't("服务商", "Provider")' not in source
-    assert 't("Base URL", "Base URL")' not in source
+    # 新增：UI 上有 provider 切换控件，但只在 API / 模型 视图暴露
+    assert 't("服务商", "Provider")' in source
+    assert "providers.forEach" in source
+    # 不应在 query string 暴露 base_url（避免敏感信息外泄）
     assert '"&provider="' not in source
+    assert '"&base_url="' not in source
 
 
 def main() -> int:

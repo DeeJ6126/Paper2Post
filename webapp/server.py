@@ -34,8 +34,48 @@ from paper2post.llm.registry import (
     DEEPSEEK_BASE_URL,
     DEEPSEEK_DEFAULT_MODEL,
     DEEPSEEK_MODELS,
+    OPENAI_COMPATIBLE,
+    ALIASES,
+    all_provider_names,
 )
 from paper2post.pipeline import Pipeline, make_provider
+
+
+# 支持在 web UI 上切换的 provider 列表（OpenAI 兼容 + 已配 base_url 的）。
+# 未来接 Claude/Gemini 只需在 registry.SPECIAL_PROVIDERS 上加适配层。
+WEB_PROVIDERS = {
+    name: {
+        "alias": ALIASES.get(name, name),
+        "base_url": meta.get("base_url", ""),
+        "default_model": meta.get("model", ""),
+        "env_key": meta.get("env_key", ""),
+    }
+    for name, meta in OPENAI_COMPATIBLE.items()
+    if meta.get("base_url")
+}
+
+
+def _resolve_provider_meta(provider: str) -> dict:
+    """按 provider 名字取出 base_url / default model / env_key。未知 provider 走 deepseek 兜底。"""
+    if provider in WEB_PROVIDERS:
+        return WEB_PROVIDERS[provider]
+    return WEB_PROVIDERS["deepseek"]
+
+
+def _models_for_provider(provider: str) -> list:
+    """每个 provider 在 UI 上展示的候选模型清单。"""
+    if provider == "deepseek":
+        return list(DEEPSEEK_MODELS)
+    if provider == "moonshot":
+        # 保留常用 3 个档位 + 留给用户输入 kimi-k3 / kimi-latest 等新模型
+        return [
+            "moonshot-v1-8k",
+            "moonshot-v1-32k",
+            "moonshot-v1-128k",
+        ]
+    # 其它 provider：默认模型 + 允许自定义
+    meta = _resolve_provider_meta(provider)
+    return [meta["default_model"]] if meta["default_model"] else []
 from paper2post.utils import markdown_to_html
 
 if getattr(sys, "frozen", False):
@@ -68,12 +108,14 @@ def _run_pipeline(
     pdf_path.write_bytes(pdf_bytes)
 
     settings = load_settings()
+    provider = settings.get("provider") or "deepseek"
+    meta = _resolve_provider_meta(provider)
     try:
         llm = make_provider(
             settings,
-            provider_name="deepseek",
-            model=model or DEEPSEEK_DEFAULT_MODEL,
-            base_url=DEEPSEEK_BASE_URL,
+            provider_name=provider,
+            model=model or settings.get("model") or meta["default_model"],
+            base_url=meta["base_url"],
         )
     except LLMError:
         llm = MockProvider()
@@ -200,12 +242,14 @@ def run_article_action(run_id: str, action: str, model: str) -> Dict[str, Any]:
             figs.append(FigureAnalysis(**f))
 
     settings = load_settings()
+    provider = settings.get("provider") or "deepseek"
+    meta = _resolve_provider_meta(provider)
     try:
         llm = make_provider(
             settings,
-            provider_name="deepseek",
-            model=model or DEEPSEEK_DEFAULT_MODEL,
-            base_url=DEEPSEEK_BASE_URL,
+            provider_name=provider,
+            model=model or settings.get("model") or meta["default_model"],
+            base_url=meta["base_url"],
         )
     except LLMError:
         llm = MockProvider()
@@ -279,34 +323,50 @@ def _update_env(key: str, value: str) -> None:
 
 def get_models_info() -> dict:
     s = load_settings()
+    provider = s.get("provider") or "deepseek"
+    meta = _resolve_provider_meta(provider)
+    models = _models_for_provider(provider)
     return {
-        "provider": "deepseek",
-        "model": s.get("model") or DEEPSEEK_DEFAULT_MODEL,
-        "models": list(DEEPSEEK_MODELS),
+        "provider": provider,
+        "model": s.get("model") or meta["default_model"],
+        "models": models,
         "allow_custom_model": True,
-        "has_api_key": bool(os.environ.get("DEEPSEEK_API_KEY")),
+        "has_api_key": bool(os.environ.get(meta["env_key"])) if meta["env_key"] else False,
+        "providers": [
+            {"name": name, "alias": info["alias"], "env_key": info["env_key"]}
+            for name, info in WEB_PROVIDERS.items()
+        ],
     }
 
 
 def save_models(payload: dict) -> dict:
+    provider = str(payload.get("provider") or "deepseek").strip().lower()
+    if provider not in WEB_PROVIDERS:
+        raise ValueError(f"unsupported provider: {provider}")
+    meta = _resolve_provider_meta(provider)
     model = str(payload.get("model") or "").strip()
     if not model:
         raise ValueError("model is required")
     api_key = str(payload.get("api_key") or "").strip()
     if "\n" in api_key or "\r" in api_key:
         raise ValueError("api_key must be a single line")
-    if api_key:
-        _update_env("DEEPSEEK_API_KEY", api_key)
+    if api_key and meta["env_key"]:
+        _update_env(meta["env_key"], api_key)
+    # 切换 provider 时清掉旧 provider 的 base_url，避免误用
     save_user_settings(
-        {"provider": "deepseek", "model": model, "base_url": DEEPSEEK_BASE_URL}
+        {"provider": provider, "model": model, "base_url": meta["base_url"]}
     )
     return {
         "ok": True,
-        "provider": "deepseek",
+        "provider": provider,
         "model": model,
-        "models": list(DEEPSEEK_MODELS),
+        "models": _models_for_provider(provider),
         "allow_custom_model": True,
-        "has_api_key": bool(os.environ.get("DEEPSEEK_API_KEY")),
+        "has_api_key": bool(os.environ.get(meta["env_key"])) if meta["env_key"] else False,
+        "providers": [
+            {"name": name, "alias": info["alias"], "env_key": info["env_key"]}
+            for name, info in WEB_PROVIDERS.items()
+        ],
     }
 
 
@@ -456,12 +516,14 @@ def start_generation(pdf_bytes: bytes, options: dict, model: str) -> dict:
     def work():
         try:
             s = load_settings()
+            provider = s.get("provider") or "deepseek"
+            meta = _resolve_provider_meta(provider)
             try:
                 llm = make_provider(
                     s,
-                    provider_name="deepseek",
-                    model=model or DEEPSEEK_DEFAULT_MODEL,
-                    base_url=DEEPSEEK_BASE_URL,
+                    provider_name=provider,
+                    model=model or s.get("model") or meta["default_model"],
+                    base_url=meta["base_url"],
                 )
             except LLMError:
                 llm = MockProvider()

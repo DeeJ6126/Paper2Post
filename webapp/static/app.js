@@ -3,7 +3,7 @@
   var state = {
     lang: "zh",
     view: "home", file: null, result: null,
-    config: { article_type: "deep_review", audience: "Biology Graduate", length: "2500", language: "中文", style: "Academic Popularization", provider: "mock", model: "" },
+    config: { article_type: "deep_review", audience: "Biology Graduate", length: "2500", language: "中文", style: "Academic Popularization", provider: "deepseek", model: "deepseek-v4-flash-vision-exp" },
     paperFiles: [], selClaim: null, selFig: null, activeRun: null, resultsByRun: {}, generations: [],
     activeWorkspaceTab: { paper: 0, editor: 0, inspector: 0 },
     dismissed: [], accepted: [],
@@ -174,7 +174,7 @@
     show("processing");
     var list = document.getElementById("stepList"); var items = list ? Array.prototype.slice.call(list.children) : [];
     var activity = document.getElementById("activity");
-    var cfg = { article_type: state.config.article_type, audience: state.config.audience, length: state.config.length, language: state.config.language === "中文" ? "zh-CN" : "en", style: state.config.style, provider: state.config.provider || "mock", model: state.config.model || "" };
+    var cfg = { article_type: state.config.article_type, audience: state.config.audience, length: state.config.length, language: state.config.language === "中文" ? "zh-CN" : "en", style: state.config.style, model: state.config.model || "deepseek-v4-flash-vision-exp" };
     var qs = Object.keys(cfg).map(function (k) { return encodeURIComponent(k) + "=" + encodeURIComponent(cfg[k]); }).join("&");
     function setSteps(step) { items.forEach(function (it, i) { it.className = (i < step ? "step done" : (i === step ? "step active" : "step")); }); }
     function logMsg(label) { if (activity) { var d = h("div"); d.appendChild(h("div", "weak", new Date().toLocaleTimeString())); d.appendChild(h("div", null, label)); activity.appendChild(d); } }
@@ -362,29 +362,41 @@
 
   function renderEvidence(v) { var c = container(v); c.appendChild(h("h1", "h1", t("证据", "Evidence"))); var ev = (state.result && state.result.evidence && state.result.evidence.evidence) || []; if (!ev.length) { c.appendChild(h("h2", "h2 mt16", t("选择一篇论文查看证据。", "Select a paper to view grounded evidence."))); return; } ev.forEach(function (e, i) { var b = h("div", "card mt12"); b.appendChild(h("div", "cap", "Claim 0" + (i + 1))); b.appendChild(h("div", "h3", "“" + (e.claim || "") + "”")); b.appendChild(h("div", "weak mt8", t("依据", "Supported by") + ": " + (e.source_section || "Results") + " · Paragraph 8")); b.appendChild(h("div", "weak", t("图表", "Figure") + ": " + (e.figure || "—"))); b.appendChild(h("div", "badge green mt8", t("置信度", "Confidence") + " " + Math.round((e.confidence || 0) * 100) + "% · " + t("已验证", "Verified"))); c.appendChild(b); }); }
 
-  var PROVIDERS = ["mock", "deepseek", "qwen", "moonshot", "groq", "mistral", "openrouter", "ollama", "vllm", "anthropic", "gemini", "openai"];
+  var DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash-vision-exp";
+  var CUSTOM_MODEL = "__custom__";
 
   function sel(opts, val) { var s = h("select", "select"); opts.forEach(function (o) { var op = h("option", null, o); op.value = o; s.appendChild(op); }); s.value = val || opts[0]; return s; }
   function fld(label, widget) { var f = h("div", "field mt8"); f.appendChild(h("label", null, label)); f.appendChild(widget); return f; }
+  function modelPicker(models, current) {
+    var known = (models || []).slice(); if (!known.length) known = [DEFAULT_DEEPSEEK_MODEL];
+    var wrap = h("div"); var select = h("select", "select");
+    known.forEach(function (model) { var option = h("option", null, model); option.value = model; select.appendChild(option); });
+    var customOption = h("option", null, t("自定义模型 ID…", "Custom model ID…")); customOption.value = CUSTOM_MODEL; select.appendChild(customOption);
+    var custom = h("input", "input mt8"); custom.placeholder = "deepseek-model-id";
+    var isKnown = known.indexOf(current) !== -1; select.value = isKnown ? current : CUSTOM_MODEL; custom.value = isKnown ? "" : (current || "");
+    function sync() { custom.style.display = select.value === CUSTOM_MODEL ? "block" : "none"; }
+    select.onchange = sync; sync(); wrap.appendChild(select); wrap.appendChild(custom);
+    return { element: wrap, value: function () { return select.value === CUSTOM_MODEL ? custom.value.trim() : select.value; } };
+  }
 
   function renderSettings(v) {
     var c = container(v); c.appendChild(h("h1", "h1", t("设置", "Settings")));
     c.appendChild(h("p", "muted mt8", t("这些默认值将用于后续生成的论文。", "These defaults apply to new generations.")));
     var card = h("div", "card mt16"); c.appendChild(card);
     var grid = h("div", "grid g2"); card.appendChild(grid);
-    fetch("/api/settings").then(function (r) { return r.json(); }).then(function (s) {
+    Promise.all([fetch("/api/settings").then(function (r) { return r.json(); }), fetch("/api/models").then(function (r) { return r.json(); })]).then(function (values) {
+      var s = values[0], models = values[1];
       grid.appendChild(fld(t("生成模式", "Generation Mode"), sel(["deep_review", "speed", "methods", "resource"], s.article_type || state.config.article_type)));
       grid.appendChild(fld(t("长度", "Length"), sel(["1500", "2500", "4000"], String(s.article_length || state.config.length))));
       grid.appendChild(fld(t("写作风格", "Writing Style"), sel(["Academic Popularization", "Professional", "Concise", "Deep Dive"], s.style || state.config.style)));
       grid.appendChild(fld(t("语言", "Language"), sel([t("中文", "中文"), "English"], (s.language === "en" ? "English" : t("中文", "中文")))));
-      grid.appendChild(fld(t("LLM 引擎", "LLM engine"), sel(PROVIDERS, s.provider || state.config.provider)));
-      var mi = h("input", "input"); mi.value = s.model || state.config.model || ""; grid.appendChild(fld(t("模型", "Model"), mi));
-      var bi = h("input", "input"); bi.value = s.base_url || ""; bi.placeholder = "base_url (optional)"; grid.appendChild(fld(t("Base URL", "Base URL"), bi));
+      var picker = modelPicker(models.models, s.model || models.model || state.config.model); grid.appendChild(fld(t("DeepSeek 模型", "DeepSeek Model"), picker.element));
       var save = h("button", "btn btn-primary mt24", t("保存设置", "Save Settings")); save.style.cssText = "width:100%;justify-content:center;padding:12px";
       save.onclick = function () {
-        var vals = { article_type: grid.children[0].querySelector("select").value, article_length: parseInt(grid.children[1].querySelector("select").value, 10), style: grid.children[2].querySelector("select").value, language: (grid.children[3].querySelector("select").value === "English" ? "en" : "zh-CN"), provider: grid.children[4].querySelector("select").value, model: grid.children[5].querySelector("input").value, base_url: grid.children[6].querySelector("input").value };
+        var vals = { article_type: grid.children[0].querySelector("select").value, article_length: parseInt(grid.children[1].querySelector("select").value, 10), style: grid.children[2].querySelector("select").value, language: (grid.children[3].querySelector("select").value === "English" ? "en" : "zh-CN"), model: picker.value() };
+        if (!vals.model) { toast(t("请输入模型 ID", "Enter a model ID")); return; }
         Object.keys(vals).forEach(function (k) { if (!vals[k]) delete vals[k]; });
-        fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(vals) }).then(function (r) { return r.json(); }).then(function (res) { if (res.ok) { toast(t("设置已保存", "Settings saved")); state.config.article_type = vals.article_type; state.config.length = String(vals.article_length); state.config.style = vals.style; state.config.language = vals.language === "en" ? "English" : "中文"; state.config.provider = vals.provider; state.config.model = vals.model; } else toast(t("保存失败", "Save failed")); });
+        fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(vals) }).then(function (r) { return r.json(); }).then(function (res) { if (res.ok) { toast(t("设置已保存", "Settings saved")); state.config.article_type = vals.article_type; state.config.length = String(vals.article_length); state.config.style = vals.style; state.config.language = vals.language === "en" ? "English" : "中文"; state.config.model = vals.model; } else toast(t("保存失败", "Save failed")); });
       };
       card.appendChild(save);
     });
@@ -392,18 +404,17 @@
 
   function renderApi(v) {
     var c = container(v); c.appendChild(h("h1", "h1", t("API / 模型", "API / Models")));
-    c.appendChild(h("p", "muted mt8", t("配置 LLM 服务的密钥与模型；保存后写入 .env，生成时即生效。", "Configure your LLM key & model. Saved to .env and used at generation.")));
+    c.appendChild(h("p", "muted mt8", t("配置 DeepSeek 密钥与模型；密钥仅保存在本机 .env。", "Configure DeepSeek credentials and model. The key stays in the local .env file.")));
     fetch("/api/models").then(function (r) { return r.json(); }).then(function (m) {
       var card = h("div", "card mt16"); c.appendChild(card); var grid = h("div", "grid g2"); card.appendChild(grid);
-      var prov = sel(m.providers || PROVIDERS, m.provider || "openai"); grid.appendChild(fld(t("服务商", "Provider"), prov));
-      var mi = h("input", "input"); mi.value = m.model || ""; mi.placeholder = "gpt-4o-mini"; grid.appendChild(fld(t("模型", "Model"), mi));
-      var bi = h("input", "input"); bi.value = m.base_url || ""; bi.placeholder = "base_url (optional)"; grid.appendChild(fld(t("Base URL", "Base URL"), bi));
+      var picker = modelPicker(m.models, m.model || DEFAULT_DEEPSEEK_MODEL); grid.appendChild(fld(t("DeepSeek 模型", "DeepSeek Model"), picker.element));
       var ak = h("input", "input"); ak.type = "password"; ak.placeholder = m.has_api_key ? "••••••••" : "sk-…"; grid.appendChild(fld(t("API Key", "API Key"), ak));
       var status = h("div", "badge mt8 " + (m.has_api_key ? "green" : "red"), (m.has_api_key ? t("已配置密钥", "Key configured") : t("未配置密钥", "No key configured")));
       card.appendChild(status);
-      var save = h("button", "btn btn-primary mt24", t("保存并测试", "Save & Test")); save.style.cssText = "width:100%;justify-content:center;padding:12px";
+      var save = h("button", "btn btn-primary mt24", t("保存", "Save")); save.style.cssText = "width:100%;justify-content:center;padding:12px";
       save.onclick = function () {
-        var vals = { provider: prov.value, model: mi.value, base_url: bi.value, api_key: ak.value };
+        var vals = { model: picker.value(), api_key: ak.value };
+        if (!vals.model) { toast(t("请输入模型 ID", "Enter a model ID")); return; }
         Object.keys(vals).forEach(function (k) { if (!vals[k]) delete vals[k]; });
         fetch("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(vals) }).then(function (r) { return r.json(); }).then(function (res) { if (res.ok) { toast(t("已保存", "Saved") + " · " + res.provider + " / " + res.model); state.config.provider = res.provider; state.config.model = res.model; render(); } else toast(t("保存失败", "Save failed")); });
       };
@@ -418,7 +429,7 @@
     if (!state.result) { toast(t("请先生成论文", "Generate a paper first")); return; }
     state.busy = true; toast(t("AI 处理中…", "AI working…") + " (" + action + ")");
     var rid = state.result.run_id;
-    var qs = "run_id=" + encodeURIComponent(rid) + "&action=" + encodeURIComponent(action) + "&provider=" + encodeURIComponent(state.config.provider || "mock") + "&model=" + encodeURIComponent(state.config.model || "");
+    var qs = "run_id=" + encodeURIComponent(rid) + "&action=" + encodeURIComponent(action) + "&model=" + encodeURIComponent(state.config.model || DEFAULT_DEEPSEEK_MODEL);
     fetch("/api/action?" + qs, { method: "POST" }).then(function (r) { return r.json(); }).then(function (res) {
       if (res.error) { toast("Error: " + res.error); return; }
       if (state.result) state.result.article_md = res.article_md; if (res.article_html_url) state.result.article_html_url = res.article_html_url;
@@ -479,7 +490,6 @@
       if (s.article_length) state.config.length = String(s.article_length);
       if (s.style) state.config.style = s.style;
       if (s.language) state.config.language = (s.language === "en" ? "English" : "中文");
-      if (s.provider) state.config.provider = s.provider;
       if (s.model) state.config.model = s.model;
     });
     document.querySelectorAll(".sb-item[data-nav]").forEach(function (e) { e.addEventListener("click", function () { show(e.dataset.nav); }); });

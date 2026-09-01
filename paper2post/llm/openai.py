@@ -18,6 +18,7 @@ class OpenAIProvider(LLMProvider):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__(config)
         cfg = self.config or {}
+        self.name = str(cfg.get("provider") or "openai")
         api_key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY")
         base_url = cfg.get("base_url") or os.environ.get("OPENAI_BASE_URL")
         self.model = cfg.get("model") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"

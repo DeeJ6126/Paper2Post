@@ -1,10 +1,11 @@
 # Paper2Post 运行配置
 # 所有键均可被 CLI 参数覆盖。
 
-# LLM Provider: openai | mock | anthropic
-provider: openai
+# 当前 Web 版本固定使用 DeepSeek
+provider: deepseek
 
-model: gpt-4o-mini
+model: deepseek-v4-flash-vision-exp
+base_url: https://api.deepseek.com
 temperature: 0.7
 max_tokens: 4096
 

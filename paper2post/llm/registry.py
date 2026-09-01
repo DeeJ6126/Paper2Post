@@ -7,11 +7,23 @@ from typing import Any, Dict, Optional
 
 from .base import LLMProvider, LLMError
 
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash-vision-exp"
+DEEPSEEK_MODELS = [
+    DEEPSEEK_DEFAULT_MODEL,
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+]
+
 # 走 OpenAI 兼容协议（base_url + model）即可接入的 Provider
 # env_key: 该服务对应的 API Key 环境变量名
 OPENAI_COMPATIBLE: Dict[str, Dict[str, str]] = {
     "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini", "env_key": "OPENAI_API_KEY"},
-    "deepseek": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat", "env_key": "DEEPSEEK_API_KEY"},
+    "deepseek": {
+        "base_url": DEEPSEEK_BASE_URL,
+        "model": DEEPSEEK_DEFAULT_MODEL,
+        "env_key": "DEEPSEEK_API_KEY",
+    },
     "qwen": {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus", "env_key": "DASHSCOPE_API_KEY"},
     "moonshot": {"base_url": "https://api.moonshot.cn/v1", "model": "moonshot-v1-8k", "env_key": "MOONSHOT_API_KEY"},
     "groq": {"base_url": "https://api.groq.com/openai/v1", "model": "llama-3.1-70b-versatile", "env_key": "GROQ_API_KEY"},

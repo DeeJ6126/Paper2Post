@@ -30,6 +30,11 @@ if _VENDOR.is_dir():
 
 from paper2post.config import load_settings
 from paper2post.llm import MockProvider, LLMError
+from paper2post.llm.registry import (
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_DEFAULT_MODEL,
+    DEEPSEEK_MODELS,
+)
 from paper2post.pipeline import Pipeline, make_provider
 from paper2post.utils import markdown_to_html
 
@@ -51,10 +56,7 @@ MAX_UPLOAD = 50 * 1024 * 1024  # 50 MB
 def _run_pipeline(
     pdf_bytes: bytes,
     options: Dict[str, Any],
-    provider: str,
     model: str,
-    api_key: str = "",
-    base_url: str = "",
 ) -> Dict[str, Any]:
     import uuid
 
@@ -66,18 +68,15 @@ def _run_pipeline(
     pdf_path.write_bytes(pdf_bytes)
 
     settings = load_settings()
-    llm = MockProvider()
-    if provider != "mock":
-        try:
-            llm = make_provider(
-                settings,
-                provider_name=provider,
-                model=model or None,
-                api_key=api_key or None,
-                base_url=base_url or None,
-            )
-        except LLMError:
-            llm = MockProvider()
+    try:
+        llm = make_provider(
+            settings,
+            provider_name="deepseek",
+            model=model or DEEPSEEK_DEFAULT_MODEL,
+            base_url=DEEPSEEK_BASE_URL,
+        )
+    except LLMError:
+        llm = MockProvider()
 
     pipeline = Pipeline(settings=settings, llm=llm)
     paths = pipeline.run(str(pdf_path), output_dir=str(run_dir), options=options)
@@ -167,7 +166,7 @@ def _run_pipeline(
     }
 
 
-def run_article_action(run_id: str, action: str, provider: str, model: str) -> Dict[str, Any]:
+def run_article_action(run_id: str, action: str, model: str) -> Dict[str, Any]:
     """用已缓存的中间结果重新执行 Writer/Editor，实现单步再生成。"""
     from paper2post.schemas.paper import PaperAnalysis
     from paper2post.schemas.evidence import EvidenceMap
@@ -201,12 +200,15 @@ def run_article_action(run_id: str, action: str, provider: str, model: str) -> D
             figs.append(FigureAnalysis(**f))
 
     settings = load_settings()
-    llm = MockProvider()
-    if provider != "mock":
-        try:
-            llm = make_provider(settings, provider_name=provider, model=model or None)
-        except LLMError:
-            llm = MockProvider()
+    try:
+        llm = make_provider(
+            settings,
+            provider_name="deepseek",
+            model=model or DEEPSEEK_DEFAULT_MODEL,
+            base_url=DEEPSEEK_BASE_URL,
+        )
+    except LLMError:
+        llm = MockProvider()
 
     prompts = Prompts.load(_ROOT)
     writer = WriterAgent(llm, prompts, settings)
@@ -272,56 +274,40 @@ def _update_env(key: str, value: str) -> None:
     if not found:
         lines.append(f"{key}={value}")
     env.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _provider_env_key(provider: str) -> str:
-    from paper2post.llm.registry import OPENAI_COMPATIBLE
-
-    if provider in OPENAI_COMPATIBLE:
-        return OPENAI_COMPATIBLE[provider].get("env_key", "OPENAI_API_KEY")
-    if provider == "anthropic":
-        return "ANTHROPIC_API_KEY"
-    if provider == "gemini":
-        return "GEMINI_API_KEY"
-    return "OPENAI_API_KEY"
+    os.environ[key] = value
 
 
 def get_models_info() -> dict:
-    from paper2post.llm import all_provider_names
-
     s = load_settings()
     return {
-        "providers": ["mock"] + all_provider_names(),
-        "provider": s.get("provider", "openai"),
-        "model": s.get("model", ""),
-        "base_url": s.get("base_url", ""),
-        "has_api_key": bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("GEMINI_API_KEY") or s.get("api_key")),
+        "provider": "deepseek",
+        "model": s.get("model") or DEEPSEEK_DEFAULT_MODEL,
+        "models": list(DEEPSEEK_MODELS),
+        "allow_custom_model": True,
+        "has_api_key": bool(os.environ.get("DEEPSEEK_API_KEY")),
     }
 
 
 def save_models(payload: dict) -> dict:
-    provider = payload.get("provider", "openai")
-    model = payload.get("model", "")
-    base_url = payload.get("base_url", "")
-    api_key = payload.get("api_key", "")
+    model = str(payload.get("model") or "").strip()
+    if not model:
+        raise ValueError("model is required")
+    api_key = str(payload.get("api_key") or "").strip()
+    if "\n" in api_key or "\r" in api_key:
+        raise ValueError("api_key must be a single line")
     if api_key:
-        _update_env(_provider_env_key(provider), api_key)
-    if provider in ("anthropic", "gemini"):
-        if model:
-            _update_env(provider.upper() + "_MODEL", model)
-    else:
-        if model:
-            if provider == "openai":
-                _update_env("OPENAI_MODEL", model)
-            else:
-                _update_env(provider.upper() + "_MODEL", model)
-        if base_url:
-            if provider == "openai":
-                _update_env("OPENAI_BASE_URL", base_url)
-            else:
-                _update_env(provider.upper() + "_BASE_URL", base_url)
-    save_user_settings({"provider": provider, "model": model, "base_url": base_url})
-    return {"ok": True, "provider": provider, "model": model}
+        _update_env("DEEPSEEK_API_KEY", api_key)
+    save_user_settings(
+        {"provider": "deepseek", "model": model, "base_url": DEEPSEEK_BASE_URL}
+    )
+    return {
+        "ok": True,
+        "provider": "deepseek",
+        "model": model,
+        "models": list(DEEPSEEK_MODELS),
+        "allow_custom_model": True,
+        "has_api_key": bool(os.environ.get("DEEPSEEK_API_KEY")),
+    }
 
 
 def list_generations() -> list:
@@ -445,7 +431,7 @@ def get_run_response(run_id: str) -> dict:
 PROGRESS = {}
 
 
-def start_generation(pdf_bytes: bytes, options: dict, provider: str, model: str) -> dict:
+def start_generation(pdf_bytes: bytes, options: dict, model: str) -> dict:
     import uuid
     import threading
 
@@ -470,12 +456,15 @@ def start_generation(pdf_bytes: bytes, options: dict, provider: str, model: str)
     def work():
         try:
             s = load_settings()
-            llm = MockProvider()
-            if provider != "mock":
-                try:
-                    llm = make_provider(s, provider_name=provider, model=model or None)
-                except LLMError:
-                    llm = MockProvider()
+            try:
+                llm = make_provider(
+                    s,
+                    provider_name="deepseek",
+                    model=model or DEEPSEEK_DEFAULT_MODEL,
+                    base_url=DEEPSEEK_BASE_URL,
+                )
+            except LLMError:
+                llm = MockProvider()
             from paper2post.pipeline import Pipeline as _Pipe
 
             _Pipe(settings=s, llm=llm).run(str(pdf_file), output_dir=str(run_dir), options=options, progress=cb)
@@ -587,7 +576,7 @@ class Handler(BaseHTTPRequestHandler):
         if not run_id:
             return self._json(400, {"error": "run_id required"})
         try:
-            result = run_article_action(run_id, action, _q("provider", "mock"), _q("model", ""))
+            result = run_article_action(run_id, action, _q("model", DEEPSEEK_DEFAULT_MODEL))
             return self._json(200, result)
         except Exception as exc:  # noqa
             return self._json(500, {"error": str(exc)})
@@ -600,7 +589,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/settings":
             return self._json(200, save_user_settings(self._read_json()))
         if parsed.path == "/api/models":
-            return self._json(200, save_models(self._read_json()))
+            try:
+                return self._json(200, save_models(self._read_json()))
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
         if parsed.path == "/api/review":
             b = self._read_json()
             return self._json(200, set_review_state(b.get("run_id", ""), b))
@@ -628,13 +620,10 @@ class Handler(BaseHTTPRequestHandler):
             "style": _q("style", "academic_popularization"),
             "extract_figures": True,
         }
-        provider = _q("provider", "mock")
-        model = _q("model", "gpt-4o-mini")
-        api_key = _q("api_key", "")
-        base_url = _q("base_url", "")
+        model = _q("model", DEEPSEEK_DEFAULT_MODEL)
 
         try:
-            result = start_generation(pdf_bytes, options, provider, model)
+            result = start_generation(pdf_bytes, options, model)
             return self._json(200, result)
         except Exception as exc:  # noqa
             return self._json(500, {"error": str(exc)})

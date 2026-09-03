@@ -89,9 +89,27 @@ class Pipeline:
         # ---- 1. 解析 PDF ----
         paper: ParsedPaper = parse_pdf(pdf_path, figures_dir=fig_dir if save_figures else None)
 
+        # 双 LLM 策略：reader/writer/reviewer/editor 走 text_model（flash 文本任务更稳），
+        # figure_agent 走 self.llm（vision 必须）。text_model 在 options / settings 里可配。
+        text_model_name = (
+            options.get("text_model")
+            or self.settings.get("text_model")
+        )
+        text_llm = self.llm
+        if text_model_name and text_model_name != getattr(self.llm, "model", None):
+            try:
+                text_llm = make_provider(
+                    self.settings,
+                    provider_name=self.settings.get("provider", "deepseek"),
+                    model=text_model_name,
+                    base_url=self.settings.get("base_url"),
+                )
+            except Exception:
+                text_llm = self.llm
+
         self._emit(progress, 1, "Paper Reader")
         # ---- 2. Paper Reader ----
-        reader = ReaderAgent(self.llm, self.prompts, self.settings)
+        reader = ReaderAgent(text_llm, self.prompts, self.settings)
         analysis: PaperAnalysis = reader.run(paper)
 
         self._emit(progress, 2, "Evidence Mapping")
@@ -100,27 +118,30 @@ class Pipeline:
 
         self._emit(progress, 3, "Story Planner")
         # ---- 4. Story Planner ----
-        storyteller = StorytellerAgent(self.llm, self.prompts, self.settings)
+        storyteller = StorytellerAgent(text_llm, self.prompts, self.settings)
         storyline: Storyline = storyteller.run(analysis, evidence, effective_options["article_type"])
 
         self._emit(progress, 4, "Figure Agent")
-        # ---- 5. Figure Agent ----
+        # ---- 5. Figure Agent（必须用 vision model，但支持 skip_vision） ----
         figure_agent = FigureAgent(self.llm, self.prompts, self.settings)
-        fig_analysis: List = figure_agent.run(paper, storyline, effective_options["article_type"])
+        skip_vision = bool(effective_options.get("skip_vision", False))
+        fig_analysis: List = figure_agent.run(
+            paper, storyline, effective_options["article_type"], skip_vision=skip_vision
+        )
 
         self._emit(progress, 5, "Writer")
         # ---- 6. Writer ----
-        writer = WriterAgent(self.llm, self.prompts, self.settings)
+        writer = WriterAgent(text_llm, self.prompts, self.settings)
         draft_article: str = writer.run(analysis, evidence, storyline, fig_analysis, effective_options)
 
         self._emit(progress, 6, "Scientific Reviewer")
         # ---- 7. Reviewer ----
-        reviewer = ReviewerAgent(self.llm, self.prompts, self.settings)
+        reviewer = ReviewerAgent(text_llm, self.prompts, self.settings)
         factcheck: FactCheck = reviewer.run(paper, evidence, draft_article)
 
         self._emit(progress, 7, "Editor")
         # ---- 8. Editor ----
-        editor = EditorAgent(self.llm, self.prompts, self.settings)
+        editor = EditorAgent(text_llm, self.prompts, self.settings)
         final: Dict[str, str] = editor.run(draft_article, factcheck, effective_options)
 
         # ---- 9. 导出 ----

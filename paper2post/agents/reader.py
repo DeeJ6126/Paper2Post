@@ -174,10 +174,34 @@ class ReaderAgent(BaseAgent):
         """逐节调一次 LLM；任何单节失败不影响后续。
 
         长论文只取前 MAX_SECTIONS 节：13 节 × 30s × 3 retries 在 vision 模型下要 20 分钟，
-        6 节大约 5 分钟，能拿到够用的覆盖。References/Appendix 通常信息密度低、优先舍弃。
+        6 节大约 5 分钟，能拿到够用的覆盖。
+
+        选 section 策略：
+        1. 优先 abstract（论文核心）
+        2. 优先 methods / results（实验）
+        3. 跳过 references / appendix（已在 parser 层去）
+        4. 同一 heading 只取第一个
         """
+        # 优先级：abstract > methods > results > introduction > discussion > conclusion
+        priority = {
+            "abstract": 0, "introduction": 4, "methods": 1, "results": 2,
+            "discussion": 3, "conclusion": 5,
+        }
+        sorted_sections = sorted(
+            paper.sections,
+            key=lambda s: (priority.get(s.heading.lower(), 99), len(s.text or "")),
+        )
+        # 同一 heading 只取第一个
+        seen: set = set()
+        deduped: List = []
+        for s in sorted_sections:
+            norm = (s.heading or "").lower()
+            if norm in seen:
+                continue
+            seen.add(norm)
+            deduped.append(s)
+        sections_to_process = deduped[: self.MAX_SECTIONS]
         notes: List[Dict[str, Any]] = []
-        sections_to_process = paper.sections[: self.MAX_SECTIONS]
         for i, sec in enumerate(sections_to_process):
             note = self._extract_section(i + 1, sec.heading, sec.text)
             notes.append({"section_index": i + 1, "heading": sec.heading, **note})

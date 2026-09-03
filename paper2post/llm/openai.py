@@ -124,7 +124,7 @@ class OpenAIProvider(LLMProvider):
 
         kwargs: Dict[str, Any] = {
             "api_key": api_key,
-            "timeout": float(cfg.get("timeout", 30.0)),
+            "timeout": float(cfg.get("timeout", 15.0)),  # 默认 15s（之前 30s 太长，重复 timeout 浪费 90s）
             "max_retries": 0,  # 由本类 generate() 统一做重试，避免双重 retry 把单次延迟放大
         }
         if base_url:
@@ -195,18 +195,29 @@ class OpenAIProvider(LLMProvider):
         *,
         system: str = "你是科研论文图像分析助手。",
         temperature: float = 0.3,
-        max_tokens: int = 800,
+        max_tokens: int = 600,
+        timeout: Optional[float] = 8.0,
     ) -> str:
         """Vision 视觉理解：把本地图片 base64 内联后随 prompt 调一次 LLM。
 
         要求模型必须在白名单内（vision-capable），否则抛 LLMError。
         返回模型对图的纯文本描述；失败/空响应时返回 ""，由调用方兜底。
+
+        单图 timeout 默认 8s：8 张图 × 8s = 64s worst，配合 2 worker 并行 = 32s worst。
         """
         if not self.supports_vision():
             raise LLMError(
                 f"当前模型 {self.model} 不支持 vision。请切换到 deepseek-v4-flash-vision-exp 或其他视觉模型。"
             )
         data_url = _image_to_data_url(image_path)
+        # 单图调用使用独立更短 timeout 的 client
+        from openai import OpenAI
+        one_client = OpenAI(
+            api_key=self.client.api_key,
+            timeout=float(timeout) if timeout else 8.0,
+            max_retries=0,
+            base_url=str(self.client.base_url) if self.client.base_url else None,
+        )
         params: Dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -222,20 +233,10 @@ class OpenAIProvider(LLMProvider):
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        import time as _t
-        last_err: Exception | None = None
-        for attempt in range(1, 4):
-            try:
-                resp = self.client.chat.completions.create(**params)
-                text = resp.choices[0].message.content or ""
-                if text.strip():
-                    return text.strip()
-                raise ValueError("empty response")
-            except Exception as exc:
-                last_err = exc
-                if attempt < 3:
-                    _t.sleep(0.6 * attempt)
-                    continue
-                break
-        # 三次都空或失败返回空串；上层兜底
-        return ""
+        # 单图只调 1 次，超时立刻返回 ""
+        try:
+            resp = one_client.chat.completions.create(**params)
+            text = resp.choices[0].message.content or ""
+            return text.strip() if text.strip() else ""
+        except Exception:
+            return ""

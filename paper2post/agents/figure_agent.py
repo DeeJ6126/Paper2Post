@@ -21,7 +21,7 @@ MAX_FIGURES_FOR_LLM = 30
 
 # 真正用 vision 模型看图的图上限：避免 1MB+ 论文图多时 base64 payload 爆炸
 # 8 张图 × ~200KB base64 ≈ 1.6MB 文本，安全。
-MAX_FIGURES_VISION = 8
+MAX_FIGURES_VISION = 6  # 5-6 张足够代表论文（之前 8 张 + DeepSeek 限流经常卡 5+ 分钟）
 
 # 视觉描述 prompt：要求简洁，1-3 句，抓住"图里画了什么 / 表达什么关系 / 关键数据点"
 _VISION_PROMPT = (
@@ -68,6 +68,7 @@ class FigureAgent(BaseAgent):
         paper: ParsedPaper,
         storyline: Storyline,
         article_type: str,
+        skip_vision: bool = False,
     ) -> List[FigureAnalysis]:
         draft = self._draft(paper)
         # 只把前 N 张喂给 LLM，超出的图仍出现在 draft（带 low importance）里。
@@ -126,6 +127,8 @@ class FigureAgent(BaseAgent):
             if d.figure not in seen_labels:
                 merged.append(d)
         # Vision 增强：选 top-N 关键图让 vision 模型"看"一下，把视觉描述合并到 summary
+        if skip_vision:
+            return merged
         merged = self._enrich_with_vision(paper, merged)
         return merged
 

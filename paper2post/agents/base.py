@@ -31,7 +31,14 @@ class BaseAgent:
         return float(self.config.get("temperature", 0.7))
 
     def max_tokens(self) -> Optional[int]:
-        mt = self.config.get("max_tokens", 4096)
+        # vision 模型默认 800 tokens（vision 在 >800 输出容易空响应）；
+        # flash / pro 等纯文本模型默认 4096。
+        try:
+            from paper2post.llm.openai import _is_vision_model
+            default = 800 if _is_vision_model(getattr(self.llm, "model", "")) else 4096
+        except Exception:
+            default = 4096
+        mt = self.config.get("max_tokens", default)
         return int(mt) if mt else None
 
     @staticmethod

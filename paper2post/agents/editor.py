@@ -49,14 +49,29 @@ class EditorAgent(BaseAgent):
         if self.llm.is_mock:
             return draft
 
-        # 截断 article 到 4KB 避免 vision 模型 6KB+ 阈值空响应
-        safe_article = (article or "")[:4000]
+        # 截断 article 到 3KB 避免 vision 模型 ~3KB+ 阈值空响应
+        safe_article = (article or "")[:3000]
+        # factcheck 全 dump 可能 2-3KB，截断 issues 到前 5 条
+        compact_fc = {
+            "overall_score": factcheck.overall_score,
+            "passed": factcheck.passed,
+            "issues": [
+                {
+                    "category": getattr(i, "category", ""),
+                    "severity": getattr(i, "severity", ""),
+                    "claim": (getattr(i, "claim", "") or "")[:150],
+                    "problem": (getattr(i, "problem", "") or "")[:150],
+                    "suggestion": (getattr(i, "suggestion", "") or "")[:150],
+                }
+                for i in (factcheck.issues or [])[:5]
+            ],
+        }
 
         user = self.dump(
             {
                 "draft_article": safe_article,
-                "fact_check": factcheck.model_dump(),
-                "options": options,
+                "fact_check": compact_fc,
+                "options": {k: v for k, v in (options or {}).items() if k in ("language", "style", "target_audience")},
             }
         )
         text = self.llm.chat(

@@ -56,12 +56,38 @@ class LLMProvider(ABC):
 FENCE = chr(96) * 3  # triple backtick markdown fence
 
 
+def _sanitize_json_text(t: str) -> str:
+    """修复 LLM 输出 JSON 里的常见瑕疵，让 raw_decode 救得了。
+
+    - 智能引号 → ASCII "
+    - 全角逗号 → ,
+    - 尾随逗号 (,}  ,]) → 直接去掉
+    - 行注释 // 开头 → 删
+    - 控制字符 (\\x00-\\x08, \\x0b-\\x1f 除 \\t\\n) → 删
+    - 修复单引号包裹的 key/value（激进；只在 parse 失败时再尝试）
+    """
+    import re
+    # 智能引号 → ASCII 双引号
+    t = t.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+    t = t.replace("，", ",")
+    # 控制字符
+    t = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", t)
+    # 行注释（仅在 JSON 字符串外才安全；先做粗处理，由 raw_decode 兜底）
+    t = re.sub(r"//[^\n]*", "", t)
+    # 尾随逗号
+    t = re.sub(r",\s*([}\]])", r"\1", t)
+    return t
+
+
 def parse_json(text: str) -> Any:
-    """从 LLM 返回文本中提取 JSON，容忍 markdown 代码块围栏、尾部说明。
+    """从 LLM 返回文本中提取 JSON，容忍 markdown 代码块围栏、尾部说明、常见瑕疵。
 
     经验：vision 模型常常在 JSON 数组后追加 "以下是..." 这种说明文字，
     `json.loads` 会报 "Extra data" 错；改用 `json.JSONDecoder().raw_decode`
     只取第一段合法 JSON，忽略尾部。
+
+    进一步：LLM 偶尔在 JSON 字符串里写未转义的 " 或用智能引号，raw_decode 也救不
+    了我们先 sanitize（智能引号替换、尾随逗号、注释、控制字符），再 raw_decode。
     """
     t = (text or "").strip()
     if t.startswith(FENCE):
@@ -69,9 +95,16 @@ def parse_json(text: str) -> Any:
         if t.lower().startswith("json"):
             t = t[4:]
         t = t.strip()
-    # 先尝试 raw_decode：能解析首段 JSON 并忽略尾部
+    # 第一次 raw_decode（原文）
     try:
         obj, _ = json.JSONDecoder().raw_decode(t)
+        return obj
+    except Exception:
+        pass
+    # 第二次：sanitize 后再试
+    t_clean = _sanitize_json_text(t)
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(t_clean)
         return obj
     except Exception:
         pass
@@ -89,7 +122,7 @@ def parse_json(text: str) -> Any:
     end = max(end_brace, end_bracket)
     if start == -1 or end == -1 or end <= start:
         raise
-    return json.loads(t[start : end + 1])
+    return json.loads(_sanitize_json_text(t[start : end + 1]))
 
 
 def generate_json(
@@ -100,13 +133,14 @@ def generate_json(
     draft: Any,
     temperature: float = 0.7,
     max_tokens: Optional[int] = None,
-    max_retries: int = 3,
+    max_retries: int = 1,
+    _caller: str = "?",
 ) -> Any:
     """调用 Provider 请求 JSON；mock 模式或解析失败时回退到 draft。
 
-    经验：DeepSeek vision 模型（deepseek-v4-flash-vision-exp）首次冷启动调用
-    偶发返回空字符串，重试一次通常就能拿到正常响应。max_retries 控制重试次数，
-    默认 3 次（首次 + 2 次重试）。空响应与 JSON 解析失败都触发重试。
+    max_retries 默认 1：retry 在 provider 层（OpenAIProvider）已经做了 3 次，
+    外层再叠 3 次 = 最坏 9 次（277s）。现在外层只重试 1 次（一次性 fallback），
+    节省 2/3 时间。
     """
     if getattr(provider, "is_mock", False):
         return draft
@@ -129,14 +163,14 @@ def generate_json(
         except Exception as exc:
             last_err = exc
             if attempt < max_retries:
-                _t.sleep(0.6 * attempt)  # 0.6s, 1.2s backoff
+                _t.sleep(2.0)  # 给 vision 限流留缓冲
                 continue
             break
     import sys as _sys
     _sys.stderr.write(
-        f"[generate_json] gave up after {max_retries} attempts "
-        f"(provider={getattr(provider, 'name', '?')}, err={last_err}); "
+        f"[generate_json/{_caller}] gave up (provider={getattr(provider, 'name', '?')}, err={last_err}); "
         f"system_len={len(system)}, user_len={len(user)}, raw_head={last_text[:200]!r}\n"
+        f"  user_head={user[:200]!r}\n"
     )
     _sys.stderr.flush()
     return draft

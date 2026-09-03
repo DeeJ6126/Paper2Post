@@ -14,7 +14,10 @@ from paper2post.schemas.paper import ParsedFigure
 CAPTION_PATTERN = re.compile(
     r"(?im)^\s*((?:fig(?:ure)?|table)\.?\s*\d+\s*[a-z]?.*)$"
 )
-LABEL_PATTERN = re.compile(r"(?im)(?:fig(?:ure)?\.?\s*)(\d+[a-z]?)", re.IGNORECASE)
+# 限制 figure 数字范围在 1-50。超过 50 几乎都是 PDF 内部噪点 / xref 编号 / 装饰图被误判。
+LABEL_PATTERN = re.compile(
+    r"(?im)(?:fig(?:ure)?\.?\s*)([1-9]|1\d|2\d|3\d|4\d|50)\b", re.IGNORECASE
+)
 
 
 def _caption_texts(doc) -> List[str]:
@@ -69,6 +72,21 @@ def extract_figures(
 
             if not pix_bytes:
                 continue
+
+            # 过滤装饰图 / 噪点：尺寸过小的通常是 logo / header / separator
+            try:
+                from io import BytesIO
+                if ext in ("png", "jpg", "jpeg"):
+                    try:
+                        from PIL import Image
+                        with Image.open(BytesIO(pix_bytes)) as _im:
+                            w, h = _im.size
+                            if w < 200 or h < 200:
+                                continue
+                    except ImportError:
+                        pass  # 没 PIL 不强求
+            except Exception:
+                pass
 
             out_path = ""
             if figures_dir:

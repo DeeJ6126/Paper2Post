@@ -13,6 +13,38 @@ from paper2post.schemas.storyline import Storyline, StorySection
 from .base import BaseAgent
 
 
+def _short(v, n: int = 150) -> str:
+    if v is None:
+        return ""
+    s = str(v).strip()
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _compact_for_storyteller(analysis: PaperAnalysis, evidence: EvidenceMap) -> dict:
+    """把 analysis + evidence 压到 ~3KB 内，给 storyteller 用。"""
+    return {
+        "analysis": {
+            "title": analysis.title or "",
+            "research_question": _short(analysis.research_question, 300),
+            "knowledge_gap": _short(analysis.knowledge_gap, 150),
+            "hypothesis": _short(analysis.hypothesis, 150),
+            "authors_conclusion": _short(analysis.authors_conclusion, 200),
+            "background": [_short(x, 100) for x in (analysis.background or []) if x][:3],
+            "methods": [_short(x, 100) for x in (analysis.methods or []) if x][:3],
+            "main_findings": [
+                {"finding_id": f.finding_id, "finding": _short(f.finding, 150), "importance": f.importance}
+                for f in (analysis.main_findings or [])[:3]
+            ],
+            "innovation": [_short(x, 100) for x in (analysis.innovation or []) if x][:2],
+        },
+        "evidence": [
+            {"claim": _short(e.claim, 150), "source_section": _short(e.source_section, 60)}
+            for e in (evidence.evidence or [])[:3]
+            if (e.claim or "").strip()
+        ],
+    }
+
+
 class StorytellerAgent(BaseAgent):
     def __init__(
         self,
@@ -52,13 +84,7 @@ class StorytellerAgent(BaseAgent):
 
     def run(self, analysis: PaperAnalysis, evidence: EvidenceMap, mode: str) -> Storyline:
         draft = self._draft(analysis, mode)
-        user = self.dump(
-            {
-                "analysis": analysis.model_dump(),
-                "evidence": evidence.model_dump(),
-                "mode": mode,
-            }
-        )
+        user = self.dump(_compact_for_storyteller(analysis, evidence) | {"mode": mode})
         data = generate_json(
             self.llm,
             system=self.prompts.storyteller,
@@ -66,5 +92,6 @@ class StorytellerAgent(BaseAgent):
             draft=draft.model_dump(),
             temperature=self.temperature(),
             max_tokens=self.max_tokens(),
+            _caller="storyteller",
         )
         return Storyline(**data)

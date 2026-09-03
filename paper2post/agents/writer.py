@@ -36,9 +36,11 @@ DEFAULT_SECTIONS = [
 # 单节内容长度上限
 SECTION_MAX_TOKENS = 1200
 # 输入里 evidence 列表最多保留前 N 条
-EVIDENCE_KEEP = 8
+# 经验：vision 模型在 ~3KB 输入下稳定；evidence 8×200B=1.6KB 加上其他字段就超。
+# 砍到 3 条保 vision 稳定。flash / pro 等纯文本模型可以更大但当前默认 vision。
+EVIDENCE_KEEP = 3
 # 输入里 figures 列表最多保留前 N 条
-FIGURES_KEEP = 6
+FIGURES_KEEP = 2
 
 
 def _short_text(v, limit: int = 200) -> str:
@@ -67,7 +69,7 @@ def _compact_analysis(a: PaperAnalysis) -> dict:
                 "figure": _short_text(f.figure, 60),
                 "importance": f.importance or "medium",
             }
-            for f in (a.main_findings or [])[:6]
+            for f in (a.main_findings or [])[:3]
         ],
         "innovation": [_short_text(x, 150) for x in (a.innovation or []) if x][:3],
         "limitations": [_short_text(x, 150) for x in (a.limitations or []) if x][:3],

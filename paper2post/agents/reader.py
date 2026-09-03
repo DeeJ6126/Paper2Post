@@ -326,18 +326,52 @@ class ReaderAgent(BaseAgent):
 
         # 兜底层：当所有 notes 都没 claims（LLM 全程空响应）时，从 paper.abstract 拆句作为
         # 抽象级的 background/claims 来源。background 至少有内容，启发式关键词也能用上。
-        if not any(n.get("claims") for n in notes) and paper.abstract:
+        abstract_sents: List[str] = []
+        if paper.abstract:
             abstract_sents = [
                 s.strip() for s in
                 paper.abstract.replace("。", "。\n").replace(".", ".\n").split("\n")
                 if s.strip() and len(s.strip()) > 12
-            ][:6]
-            if abstract_sents:
-                notes = list(notes) + [
-                    {"role": "abstract", "claims": abstract_sents[:3], "gap_phrasing": "", "hypothesis_phrasing": "", "conclusion_phrasing": "", "innovation_phrases": []},
-                ]
-                for s in abstract_sents:
-                    all_claims.append(s)
+            ][:8]
+        if not any(n.get("claims") for n in notes) and abstract_sents:
+            notes = list(notes) + [
+                {"role": "abstract", "claims": abstract_sents[:3], "gap_phrasing": "", "hypothesis_phrasing": "", "conclusion_phrasing": "", "innovation_phrases": []},
+            ]
+            for s in abstract_sents:
+                all_claims.append(s)
+            # 2026-09-03 评审 2 P0-2：当 LLM 全程空响应时，下游 writer 没有 main_findings /
+            # methods / limitations 可用 → fallback 到 abstract 拆句。13 篇中 AlphaGenome
+            # 之类的 PDF 全文没 abstract heading，会退化成单段；这里按启发式切片
+            # 拆出 method 句（"we present/propose/develop"）、finding 句（"achieve/show/demonstrate"）
+            # 和 limitation 句（"however/limitation/challenge"）。
+            for s in abstract_sents:
+                sl = s.lower()
+                if not all_methods and any(kw in sl for kw in (
+                    "we present", "we propose", "we introduce", "we develop",
+                    "we design", "we build", "we describe", "we use",
+                    "we train", "we apply", "we combine", "we adopt",
+                    "本文", "我们提出", "本工作", "采用", "构建",
+                )):
+                    all_methods.append(s)
+                if not all_findings and any(kw in sl for kw in (
+                    "achieve", "show", "demonstrate", "outperform", "improve",
+                    "yield", "result in", "obtain", "exceed", "surpass",
+                    "SOTA", "state-of-the-art", "首次", "超过", "达到", "实现",
+                )):
+                    all_findings.append({"finding_id": f"F{len(all_findings) + 1}", "finding": s, "evidence": "", "figure": "", "importance": "medium"})
+                if not all_limitations and any(kw in sl for kw in (
+                    "however", "limitation", "challenge", "remain", "difficult",
+                    "bottleneck", "expensive", "scalab", "lack of",
+                    "然而", "局限", "不足", "挑战", "昂贵", "难以", "尚不能",
+                )):
+                    all_limitations.append(s)
+            # 终极兜底：如果 main_findings 仍然空，把 abstract 中部 2-3 句作为 findings
+            if not all_findings and len(abstract_sents) >= 2:
+                for s in abstract_sents[1:4]:
+                    all_findings.append({"finding_id": f"F{len(all_findings) + 1}", "finding": s, "evidence": "", "figure": "", "importance": "medium"})
+            # methods 终极兜底：abstract 前 1 句
+            if not all_methods and abstract_sents:
+                all_methods.append(abstract_sents[0])
 
         # 启发式 fallback：当 section notes 没显式提供时，从 claims 里抓
         if not gaps:

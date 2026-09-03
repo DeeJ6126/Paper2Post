@@ -13,6 +13,8 @@ vendor/
 # Outputs
 outputs/
 *.log
+# Test run outputs (full-paper → tweet pipeline test artifacts)
+outputs_test_run/
 
 # Sample generated artifacts
 examples/sample_paper.pdf

@@ -133,7 +133,8 @@ class Pipeline:
 
         self._emit(progress, 5, "Writer")
         # ---- 6. Writer ----
-        writer = WriterAgent(text_llm, self.prompts, self.settings)
+        # 2026-09-03 评审 2 P0-4：传 figures_dir 让 writer 注入 figure 引用时用对扩展名（png/jpeg/jpg）
+        writer = WriterAgent(text_llm, self.prompts, self.settings, figures_dir=fig_dir)
         # 2026-09-03 评审 1 + probe 验证：reader 经常 LLM empty response，paper_analysis 全空，
         # writer fallback 只靠 analysis 字段没东西可拼。直接把 paper.abstract 传进去，
         # 让 fallback 至少有 1500 字符的真实信息可用，不再产 `(role — 未能生成)` 残废文章。

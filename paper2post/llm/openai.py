@@ -113,7 +113,7 @@ class OpenAIProvider(LLMProvider):
         self.model = cfg.get("model") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
         self.api_key = api_key
         self.base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
-        self.timeout = float(cfg.get("timeout", 12.0))  # 默认 12s（2026-09-03 观察：DeepSeek flash 偶尔单次 20s+ 不返回，12s 失败快走）
+        self.timeout = float(cfg.get("timeout", 8.0))  # 默认 8s（DeepSeek flash 偶尔 30s+ 不返回，8s 失败快走、配合 fallback 兜底）
         if not self.api_key:
             raise LLMError(
                 "OPENAI_API_KEY 未设置。请:\n"

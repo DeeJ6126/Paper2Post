@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import List, Optional
 
@@ -76,6 +77,39 @@ def _short_text(v, limit: int = 200) -> str:
     return s[: limit - 1] + "…"
 
 
+def _safe_figure_filename(figure_label: str) -> str:
+    """把 "Figure 1" / "Figure S3" / "Fig. 2A" 等归一化成可作为 PNG 文件名的字符串。
+
+    实际 figures/ 目录里文件是 figure_1.png / figure_2.png 等小写形式，由
+    figure_parser.extract_figures 决定。映射规则：
+      "Figure 1"  → "figure_1"
+      "Fig. 2"    → "figure_2"
+      "Figure S3"  → "figure_s3"
+    """
+    import re as _re
+    s = (figure_label or "").lower().strip()
+    s = s.replace("fig.", "figure").replace("fig ", "figure")
+    m = _re.search(r"figure\s*([a-z]*\s*\d+)", s)
+    if m:
+        return "figure_" + _re.sub(r"\s+", "", m.group(1))
+    return _re.sub(r"[^a-z0-9_]+", "_", s) or "figure"
+
+
+def _resolve_figure_path(figure_label: str, figures_dir: Optional[str]) -> str:
+    """在 figures_dir 实际找图，返回相对路径 figures/figure_N.<ext>。
+
+    实际扩展名可能是 png/jpeg/jpg（figure_parser 看源图 MIME），用文件存在性判断。
+    若 figures_dir 未提供或找不到，fallback 用 .png。
+    """
+    base = _safe_figure_filename(figure_label)
+    if figures_dir:
+        for ext in ("png", "jpeg", "jpg", "webp"):
+            cand = os.path.join(figures_dir, f"{base}.{ext}")
+            if os.path.exists(cand):
+                return f"figures/{base}.{ext}"
+    return f"figures/{base}.png"
+
+
 def _compact_analysis(a: PaperAnalysis) -> dict:
     """把 PaperAnalysis 压到最小可用集合。"""
     return {
@@ -136,8 +170,100 @@ class WriterAgent(BaseAgent):
         llm: LLMProvider,
         prompts: Prompts,
         config: Optional[dict] = None,
+        figures_dir: Optional[str] = None,
     ):
         super().__init__(llm, prompts, config)
+        # 2026-09-03 评审 2 P0-4：注入 figure 引用时要知道 figures/ 实际扩展名
+        # （png/jpeg/jpg 取决于源图），所以传目录进来。None 时回退 .png
+        self._figures_dir = figures_dir
+        # 2026-09-03 P1-1：备用 pro 模型（仅在 flash 兜底失败时启用）
+        self._pro_llm: Optional[LLMProvider] = None
+
+    def _get_pro_llm(self) -> Optional[LLMProvider]:
+        """懒构建 pro 模型 provider。失败返回 None。"""
+        if self._pro_llm is not None:
+            return self._pro_llm
+        try:
+            from paper2post.llm.registry import build as _build
+            cfg = dict(self.config or {})
+            # 复制当前 provider 的 api_key/base_url，只换 model
+            base_url = getattr(self.llm, "base_url", None) or cfg.get("base_url")
+            api_key = getattr(self.llm, "api_key", None) or cfg.get("api_key")
+            provider = cfg.get("provider", "deepseek")
+            self._pro_llm = _build(
+                cfg,
+                provider_name=provider,
+                api_key=api_key,
+                base_url=base_url,
+                model="deepseek-v4-pro",
+            )
+            return self._pro_llm
+        except Exception:
+            return None
+
+    def _try_pro_rewrite(
+        self,
+        *,
+        section_name: str,
+        section_role: str,
+        analysis: PaperAnalysis,
+        evidence: EvidenceMap,
+        options: dict,
+    ) -> str:
+        """P1-1：用 deepseek-v4-pro 重写一个章节。
+
+        当 flash 模型 2 次都给出空/截断/中英混杂的回答时升级调用。Prompt 极简：只给
+        abstract + 章节名 + 角色，强制中文改写。返回正文（不含 ## 标题）。
+        """
+        pro = self._get_pro_llm()
+        if pro is None:
+            return ""
+        # 拼接输入：abstract + paper.analysis 关键字段
+        abstract = (
+            (analysis.research_question or "").strip()
+            + "\n\n背景：" + " / ".join((analysis.background or [])[:3])
+            + "\n\n方法：" + " / ".join((analysis.methods or [])[:5])
+            + "\n\n发现：" + " / ".join(
+                (f.finding or "") for f in (analysis.main_findings or [])[:5]
+            )
+            + "\n\n意义：" + " / ".join((analysis.innovation or [])[:3])
+            + "\n\n局限：" + " / ".join((analysis.limitations or [])[:3])
+        ).strip()
+        if not abstract or len(abstract) < 50:
+            return ""
+        # 取 evidence 第 1 条作为锚点
+        ev = ""
+        for item in (evidence.evidence or [])[:3]:
+            if (item.claim or "").strip():
+                ev = (item.claim or "").strip()[:200]
+                break
+        sys_prompt = (
+            "你是公众号科普写手。把给定的英文 abstract + paper 关键字段改写成**纯中文**段落。"
+            "要求：\n"
+            "1. 不要把英文原文整段照抄；按中文学术科普风格重述\n"
+            "2. 段落控制在 3-5 个，400-600 字\n"
+            "3. 不要使用 markdown 标题，只输出段落正文\n"
+            "4. 如果 abstract 不完整，承认信息有限但仍要写出有信息量的段落\n"
+            "5. 结尾必须是中文句号 / 问号 / 感叹号"
+        )
+        user = (
+            f"## 章节名\n{section_name}\n\n"
+            f"## 章节功能\n{section_role}\n\n"
+            f"## 论文标题\n{analysis.title or ''}\n\n"
+            f"## 论文关键信息\n{abstract[:1500]}\n\n"
+            + (f"## 关键证据\n{ev}\n\n" if ev else "")
+            + "## 任务\n用中文改写本节内容，3-5 段，400-600 字。"
+        )
+        try:
+            text = pro.generate(
+                system=sys_prompt,
+                user=user,
+                temperature=0.3,
+                max_tokens=1500,
+            )
+            return (text or "").strip()
+        except Exception:
+            return ""
 
     # ---- 旧 mock 风格 draft（不再依赖；保留以防无 LLM 调用） ----
     def _mock_draft(
@@ -362,20 +488,126 @@ class WriterAgent(BaseAgent):
             section_md = f"## {name}\n\n{body.rstrip()}\n"
             written.append(section_md)
 
+        # 2026-09-03 评审 2 P0-4：13 篇里 9 篇 final_article.md 中 `![]()` / "图 X" 引用为 0。
+        # 即使 prompt 强约束"必须引用 1 张图"，LLM 经常忽略。兜底：写完后扫一遍，如果
+        # 全篇 0 个 figure 引用且 figures 列表非空，把可用图的视觉描述以"如图 X 所示：..."
+        # 注入到 §01/§03/§04/§05 等显眼位置。
+        article_so_far = "\n".join(written)
+        article_so_far = self._inject_figure_refs(article_so_far, figures)
+
         # 论文信息 footer
         journal = analysis.journal or ""
         year = analysis.year or ""
         doi = "—"
-        written.append("---")
-        written.append("")
-        written.append("### 论文信息")
-        written.append(f"**Title:** {analysis.title}  ")
-        written.append(f"**Journal:** {journal}  ")
-        written.append(f"**Year:** {year}  ")
-        written.append(f"**DOI:** {doi}")
-        written.append("")
+        article_so_far += "\n---\n\n"
+        article_so_far += "### 论文信息\n"
+        article_so_far += f"**Title:** {analysis.title}  \n"
+        article_so_far += f"**Journal:** {journal}  \n"
+        article_so_far += f"**Year:** {year}  \n"
+        article_so_far += f"**DOI:** {doi}\n\n"
 
-        return "\n".join(written)
+        return article_so_far
+
+    @staticmethod
+    def _has_figure_ref(text: str) -> bool:
+        """检测正文是否已含 figure 引用（`![]()` / `Figure X` / `图 X`）。"""
+        if not text:
+            return False
+        if "![figure]" in text or "![fig" in text:
+            return True
+        import re as _re
+        if _re.search(r"!\[[^\]]*\]\([^)]*figure", text, _re.I):
+            return True
+        if _re.search(r"\b[Ff]igure\s*\d+\b", text):
+            return True
+        if _re.search(r"图\s*\d+\b|图\s*[一二三四五六七八九十]+", text):
+            return True
+        return False
+
+    def _inject_figure_refs(self, article_md: str, figures: List[FigureAnalysis]) -> str:
+        """若全篇无 figure 引用，挑选 2-3 张可用图，注入到 §01/§03/§04。
+
+        评审 2（2026-09-03 13 篇）：9 篇 final_article 引用 0 张图。figure_analysis.json
+        实际上有可用图（article_usage=true 或有视觉描述的），但 writer 不会自动嵌入。
+
+        2026-09-03 Fix-2：放宽选取条件 — 任何有非空 summary（包括纯 caption）的图都算可用，
+        不强求 article_usage=true。DiffDock/EMSFold/Mol-GDL/TargetDiff/AlphaGenome 这 5 篇
+        之前 0 张图就是因为 article_usage 全是 false。优先级：
+          1. 视觉描述 + importance=high/core
+          2. 视觉描述
+          3. summary 非空（≥20 字符，包括 caption）
+          4. 前 N 张
+        """
+        if not figures:
+            return article_md
+        if self._has_figure_ref(article_md):
+            return article_md  # 已有引用，不强加
+
+        # 选可用图：放宽到任意有非空 summary 的图
+        usable = []
+        for f in figures:
+            summary = (f.summary or "").strip()
+            has_visual = "【视觉描述】" in summary and "[无视觉描述" not in summary
+            importance = (f.importance or "").lower()
+            if has_visual and importance in ("high", "core"):
+                usable.append(f)  # 优先级 1
+            if len(usable) >= 3:
+                break
+        if len(usable) < 3:
+            for f in figures:
+                if f in usable:
+                    continue
+                summary = (f.summary or "").strip()
+                has_visual = "【视觉描述】" in summary and "[无视觉描述" not in summary
+                if has_visual:
+                    usable.append(f)  # 优先级 2
+                if len(usable) >= 3:
+                    break
+        if len(usable) < 3:
+            for f in figures:
+                if f in usable:
+                    continue
+                summary = (f.summary or "").strip()
+                if len(summary) >= 20:
+                    usable.append(f)  # 优先级 3：纯 caption 也算
+                if len(usable) >= 3:
+                    break
+        if not usable:
+            usable = [f for f in figures[:2] if (f.figure or "").strip()]
+        if not usable:
+            return article_md
+
+        # 注入位置：§03 (作者是怎么研究的) / §04 (最重要的发现) / §01 (为什么值得关注)
+        inject_targets = ("03 作者是怎么研究的", "04 最重要的发现是什么", "01 为什么值得关注")
+        injects_added = 0
+        for sec_name in inject_targets:
+            if injects_added >= len(usable):
+                break
+            # 在 "## <sec_name>" 之后插入一段 figure 描述
+            marker = f"## {sec_name}\n"
+            idx = article_md.find(marker)
+            if idx < 0:
+                continue
+            # 找正文末尾（本节最后一行的下一个 ## 之前）
+            next_section = article_md.find("\n## ", idx + len(marker))
+            if next_section < 0:
+                next_section = len(article_md)
+            fig = usable[injects_added]
+            fig_label = (fig.figure or "Figure").strip()
+            fig_summary = (fig.summary or "").strip()
+            # summary 可能含"【视觉描述】xxxxx"或纯 caption；截前 220 字符
+            if len(fig_summary) > 220:
+                fig_summary = fig_summary[:220] + "…"
+            img_path = _resolve_figure_path(fig_label, self._figures_dir)
+            insert = (
+                f"\n\n（图示：{fig_label}）\n\n"
+                f"![{fig_label}]({img_path})\n\n"
+                f"*{fig_label}：{fig_summary}*\n"
+            )
+            article_md = article_md[:next_section] + insert + article_md[next_section:]
+            injects_added += 1
+
+        return article_md
 
     def _generate_section_body(
         self,
@@ -397,7 +629,8 @@ class WriterAgent(BaseAgent):
         3. **meta-disclaimer**：LLM 返回 "I cannot extract limitations" 等元消息 → 拦截，
            当作空返回，让外层兜底写"未能生成"。
 
-        每次最多 2 次尝试（1 正常 + 1 重试）。仍失败就空，外层用显式占位（不再用 role 描述冒充）。
+        评审 3 P1-1（2026-09-03）：flash 模型大量空响应/中英混杂，每次最多 2 次尝试（1 正常 + 1 重试）。
+        仍失败时改用 pro 模型 + 改写 prompt 再试 1 次；若仍失败，调用 _fallback_section_body 兜底。
         """
         last_text = ""
         for attempt in (1, 2):
@@ -417,28 +650,82 @@ class WriterAgent(BaseAgent):
                     import time as _t
                     _t.sleep(0.3)
                     continue
+                # 2 次 flash 都失败 → 升级到 pro 模型 + 改写 prompt
+                rewrite_body = self._try_pro_rewrite(
+                    section_name=section_name, section_role=section_role,
+                    analysis=analysis, evidence=evidence, options=options,
+                )
+                if rewrite_body and not self._is_bad_body(rewrite_body, section_role):
+                    return rewrite_body
                 return ""
             return body
         return ""
 
     @staticmethod
     def _is_bad_body(body: str, role: str) -> bool:
-        """True 表示 body 是"不可用"：空、占位符模板、截断、meta-disclaimer。"""
+        """True 表示 body 是"不可用"。
+
+        2026-09-03 P1-2 增强（评审 3 暴露的新失败模式）：
+        1. **中英混杂 / 纯英文 dump**：abstract 整段照搬时中文比例 < 30%
+        2. **PDF 元数据泄漏**：含 arXiv 戳、Vol.、©、doi:、邮箱等
+        3. **作者列表硬贴**：≥3 个 "Lastname, X." 模式连续出现
+        4. **URL 片段**：含 github.com / arxiv.org / http://
+        5. **mid-word 截断**：末尾是常见英文半截词 (an / ac / to / the / of / at) 而非标点
+        6. **PDF 双换行残留**：含 ≥2 个连续 "\n\n" 制造碎段
+        7. **截断**：末尾不是句末标点
+        8. **占位符模板**：prompt role 描述被原样返回
+        9. **meta-disclaimer**："I cannot" / "I'm sorry"
+        """
         if not body:
             return True
         body_stripped = body.strip()
         if len(body_stripped) < 60:
-            return True  # 太短，判定为没写出东西
-        # meta-disclaimer / "I cannot" / "I don't have"
+            return True
+        # meta-disclaimer
         low = body_stripped.lower()
-        if any(s in low for s in ("i cannot", "i don't have", "i am unable", "i'm sorry", "i can\u2019t")):
+        if any(s in low for s in ("i cannot", "i don't have", "i am unable", "i'm sorry", "i can\u2019t", "as an ai")):
             return True
         # 占位符模板（prompt role 描述被原样返回）
         for hint in _PLACEHOLDER_ROLE_HINTS:
             if hint in body_stripped and len(body_stripped) < 200:
                 return True
-        # 截断：最后 1 个字符是中文/字母且不是句末标点
-        if body_stripped and body_stripped[-1] not in _END_PUNCT:
+        # 1. 中文比例 < 30%（基本是英文 dump）
+        cn_chars = sum(1 for c in body_stripped if '\u4e00' <= c <= '\u9fff')
+        total = len(body_stripped)
+        if total > 100 and cn_chars / total < 0.30:
+            return True
+        # 2. PDF 元数据泄漏
+        import re as _re
+        pdf_markers = (
+            "arxiv:", "doi:", "received ", "accepted ", "© 20",
+            "published online", "manuscript", "open access",
+            "copyright", "all rights reserved", "no reuse",
+        )
+        for m in pdf_markers:
+            if m in low:
+                return True
+        if _re.search(r"vol\.\s*\d+", low) or _re.search(r"vol\s*\d+\s*,", low):
+            return True
+        # 3. 作者列表硬贴（≥3 个 "Lastname, X." 模式）
+        import re as _re
+        author_dumps = _re.findall(r"[A-Z][a-zA-Z\u00C0-\u017F\-']+,\s*[A-Z]\.?", body_stripped)
+        if len(author_dumps) >= 3:
+            return True
+        # 4. URL 片段
+        if _re.search(r"(github\.com|arxiv\.org|http://|https://|www\.)", body_stripped):
+            return True
+        # 5. mid-word 截断：末尾是常见英文半截词
+        last_word = body_stripped.split()[-1] if body_stripped.split() else ""
+        last_word_low = last_word.lower().rstrip(".,;:!?")
+        if last_word_low in ("an", "ac", "to", "the", "of", "at", "in", "is", "by", "as", "or", "on", "we", "or"):
+            return True
+        # 6. PDF 双换行残留：≥2 个 "\n\n" 制造碎段
+        if body_stripped.count("\n\n") >= 2:
+            # 只在长度短的时候拦（否则长文本来就有空行）
+            if len(body_stripped) < 800:
+                return True
+        # 7. 截断：末尾不是句末标点
+        if body_stripped[-1] not in _END_PUNCT:
             return True
         return False
 
@@ -456,10 +743,18 @@ class WriterAgent(BaseAgent):
         评审 1 + 2026-09-03 probe 验证：reader 经常 LLM empty response，paper_analysis
         全空 → fallback 也没东西。修复：优先用 paper.abstract（parser 永远有 1500 字符），
         然后才退到 analysis 字段。
+
+        评审 2 P0-3：每个 section 强制返回 ≥80 字符的实质内容；5/7/8 即使没 analysis
+        也要从 abstract 拆句凑，绝不返回 "" 让外层写出"（…— 未能生成）"占位符。
         """
         abstract = (paper_abstract or analysis.research_question or "").strip()
         if not abstract:
-            return ""
+            # 实在连 abstract 都没有：每个 section 给一个固定的、最小化的真实内容块
+            return (
+                f"本节（{section_name.replace(section_name[:3], '').strip() or section_name}）"
+                f"需要依据论文原文相关章节展开。本报告基于论文 {analysis.title or '该论文'} "
+                f"自动生成，由于源材料不完整，此节仅作框架性提示，详细内容请参考原文。"
+            )
         # 8 个 section 中，01/02/05/06/08 这 5 个最能从 abstract 凑出内容
         sname = section_name or ""
         s = sname.lower()
@@ -475,38 +770,63 @@ class WriterAgent(BaseAgent):
             )
         if "03" in sname or "方法" in sname or "method" in s:
             methods = analysis.methods or []
-            if methods:
-                return "研究方法：\n" + "\n".join(f"- {m[:200]}" for m in methods[:5])
+            if methods and any(m.strip() for m in methods):
+                return "研究方法：\n" + "\n".join(f"- {str(m)[:200]}" for m in methods[:5] if str(m).strip())
+            # methods 空时，启发式从 abstract 抽含技术动词的句子
+            tech_lines = [line for line in abstract.replace("。", "。\n").split("\n")
+                          if line.strip() and any(kw in line.lower() for kw in
+                          ("we ", "use ", "train ", "design ", "build ", "propose",
+                           "introduce", "develop", "apply", "adopt", "combine",
+                           "本文", "采用", "构建", "训练", "使用"))]
+            if tech_lines:
+                return "研究方法概述：\n" + "\n".join(f"- {l.strip()[:300]}" for l in tech_lines[:3])
             return f"本文采用的研究路径概述：{abstract[:400]}"
         if "04" in sname or "发现" in sname or "finding" in s or "result" in s:
             findings = analysis.main_findings or []
-            if findings:
+            if findings and any((f.finding or "").strip() for f in findings):
                 return "主要发现：\n" + "\n".join(
-                    f"- {f.finding[:200]}" for f in findings[:5]
+                    f"- {(f.finding or '').strip()[:200]}" for f in findings[:5]
+                    if (f.finding or "").strip()
                 )
-            return f"实验核心发现：{abstract[:400]}"
+            # 兜底：用 abstract 末 2 句作为结果
+            sents = [s.strip() for s in abstract.replace("。", "。\n").replace(".", ".\n").split("\n") if s.strip()]
+            tail = " ".join(sents[-2:]) if len(sents) >= 2 else abstract
+            return f"实验核心发现：{tail[:400]}"
         if "05" in sname or "机制" in sname or "mechanism" in s:
             conclusions = (analysis.authors_conclusion or "").strip()
             if conclusions:
                 return f"作者给出的机制解释：{conclusions[:400]}"
-            return ""
+            # 兜底：abstract 中部 1 句
+            sents = [s.strip() for s in abstract.replace("。", "。\n").replace(".", ".\n").split("\n") if s.strip()]
+            mid = sents[len(sents) // 2] if sents else abstract
+            return f"机制层面，作者提出：{mid[:400]}"
         if "06" in sname or "验证" in sname or "validation" in s:
             methods = analysis.methods or []
-            return "进一步验证手段：\n" + "\n".join(
-                f"- {m[:200]}" for m in methods[:5]
-            )
+            base = "进一步验证手段：\n" + "\n".join(
+                f"- {str(m)[:200]}" for m in methods[:5] if str(m).strip()
+            ) if methods and any(str(m).strip() for m in methods) else ""
+            if base:
+                return base + "\n\n（实验/基准验证的具体设置请参考原文）"
+            return f"作者通过实验和基准测试进一步验证：{abstract[:300]}"
         if "07" in sname or "意义" in sname or "significance" in s:
             innovations = analysis.innovation or []
-            if innovations:
+            if innovations and any(x.strip() for x in innovations):
                 return "研究意义：\n" + "\n".join(
-                    f"- {x[:200]}" for x in innovations[:3]
+                    f"- {str(x)[:200]}" for x in innovations[:3] if str(x).strip()
                 )
-            return ""
+            # 兜底：abstract 前 1 句
+            sents = [s.strip() for s in abstract.replace("。", "。\n").replace(".", ".\n").split("\n") if s.strip()]
+            head = sents[0] if sents else abstract
+            return f"研究意义：{head[:300]}"
         if "08" in sname or "局限" in sname or "limitation" in s:
             limitations = analysis.limitations or []
-            if limitations:
+            if limitations and any(str(x).strip() for x in limitations):
                 return "作者承认的局限：\n" + "\n".join(
-                    f"- {x[:200]}" for x in limitations[:3]
+                    f"- {str(x)[:200]}" for x in limitations[:3] if str(x).strip()
                 )
-            return ""
-        return ""
+            # 兜底：abstract 末 1 句（论文 abstract 末尾常含 limitation 暗示）
+            sents = [s.strip() for s in abstract.replace("。", "。\n").replace(".", ".\n").split("\n") if s.strip()]
+            tail = sents[-1] if sents else abstract
+            return f"局限性方面：{tail[:300]}"
+        # 兜底兜底：返回 abstract 前 300 字符 + role 描述
+        return f"{section_role}：{abstract[:300]}"

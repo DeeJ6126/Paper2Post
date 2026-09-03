@@ -158,31 +158,15 @@ class OpenAIProvider(LLMProvider):
         if json_mode and _should_use_json_response_format(self.model):
             params["response_format"] = {"type": "json_object"}
 
-        # 单次 HTTP 超时 30s（client 配的）。重试策略：
-        # - 第一次失败：检查原因。空响应 / JSON 解析失败 → 立刻 fallback（不重试）
-        # - 5xx / 网络错 / 限流 → 重试 1 次 + 退避
-        # 经验：vision 模型空响应是不可预测的，重试 3 次同样大小 payload 没意义，
-        # 上层 base.py 已经做兜底，retries 越快越省时间。
-        import time as _t
-        last_err: Exception | None = None
-        for attempt in range(1, 3):  # 最多 2 次（首次 + 1 次重试）
-            try:
-                resp = self.client.chat.completions.create(**params)
-                text = resp.choices[0].message.content or ""
-                if text.strip():
-                    return text
-                # 空响应：不再重试，让上层 fallback
-                last_err = ValueError("empty response")
-                break
-            except Exception as exc:
-                last_err = exc
-                if not _is_retriable_error(exc):
-                    break
-                if attempt < 2:
-                    _t.sleep(2.0 * attempt)  # 2s
-                    continue
-                break
-        return ""
+        # 单次 HTTP 调用，失败立刻返回。retry 在上层（base.py 1 次）和外层。
+        # 经验：keep-alive 连接被服务端 idle timeout 断开后，retry 同大小 payload
+        # 经常再等 15s。**单次 + 立即 fallback** 最快。
+        try:
+            resp = self.client.chat.completions.create(**params)
+            text = resp.choices[0].message.content or ""
+            return text if text.strip() else ""
+        except Exception:
+            return ""
 
     # ---------- vision ----------
     def supports_vision(self) -> bool:

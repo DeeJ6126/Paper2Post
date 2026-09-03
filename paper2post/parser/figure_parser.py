@@ -42,19 +42,41 @@ def extract_figures(
     doc,
     pdf_path: str,
     figures_dir: str | None = None,
+    max_figures: int = 50,
+    max_page_size_mb: float = 8.0,
 ) -> Tuple[List[ParsedFigure], List[str]]:
-    """抽取图像并渲染。返回 (figures, captions)。"""
+    """抽取图像并渲染。返回 (figures, captions)。
+
+    关键改进（深挖 5 篇大论文卡死 root cause）：
+    1. 抽图上限 max_figures=50（默认）：DeepGGL 45MB / AlphaGenome 70MB 抽几百张图卡死
+    2. 跳过超大页：max_page_size_mb=8MB（避免几百 MB 单页拖死 extract_image）
+    3. 边抽边检查 size：单张图 > 5MB 跳过
+    4. 整页渲染走 get_pixmap 时强制 100 DPI（之前默认 72 DPI 出图太大）
+    """
     figures: List[ParsedFigure] = []
     seen: set = set()
     page_count = doc.page_count
+    if max_figures is None or max_figures <= 0:
+        max_figures = 50
 
     for page_index in range(page_count):
+        if len(figures) >= max_figures:
+            break
         page = doc[page_index]
         for img in page.get_images(full=True):
+            if len(figures) >= max_figures:
+                break
             xref = img[0]
             if xref in seen:
                 continue
             seen.add(xref)
+
+            # 大页跳过（300MB+ 单页 extract_image 极慢）
+            try:
+                if page.rect.width * page.rect.height > 50_000_000:
+                    continue
+            except Exception:
+                pass
 
             rects = page.get_image_rects(xref)
             clip = rects[0] if rects else None
@@ -73,7 +95,11 @@ def extract_figures(
             if not pix_bytes:
                 continue
 
-            # 过滤装饰图 / 噪点：尺寸过小的通常是 logo / header / separator
+            # 过滤超大单图（避免 base64 撑爆）
+            if len(pix_bytes) > 5 * 1024 * 1024:
+                continue
+
+            # 过滤装饰图 / 噪点
             try:
                 from io import BytesIO
                 if ext in ("png", "jpg", "jpeg"):

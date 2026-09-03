@@ -134,7 +134,13 @@ class Pipeline:
         self._emit(progress, 5, "Writer")
         # ---- 6. Writer ----
         writer = WriterAgent(text_llm, self.prompts, self.settings)
-        draft_article: str = writer.run(analysis, evidence, storyline, fig_analysis, effective_options)
+        # 2026-09-03 评审 1 + probe 验证：reader 经常 LLM empty response，paper_analysis 全空，
+        # writer fallback 只靠 analysis 字段没东西可拼。直接把 paper.abstract 传进去，
+        # 让 fallback 至少有 1500 字符的真实信息可用，不再产 `(role — 未能生成)` 残废文章。
+        draft_article: str = writer.run(
+            analysis, evidence, storyline, fig_analysis, effective_options,
+            paper_abstract=paper.abstract or "",
+        )
 
         self._emit(progress, 6, "Scientific Reviewer")
         # ---- 7. Reviewer ----

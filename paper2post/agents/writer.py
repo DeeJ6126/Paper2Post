@@ -336,6 +336,7 @@ class WriterAgent(BaseAgent):
         storyline: Storyline,
         figures: List[FigureAnalysis],
         options: dict,
+        paper_abstract: str = "",
     ) -> str:
         if self.llm.is_mock:
             return self._mock_draft(analysis, evidence, storyline, figures, options)
@@ -353,7 +354,9 @@ class WriterAgent(BaseAgent):
             )
             if not body:
                 # 真没救 → 用 abstract 拼一段降级内容，让文章仍有真实信息而不是空架子
-                body = self._fallback_section_body(name, role, analysis, evidence, options)
+                body = self._fallback_section_body(
+                    name, role, analysis, evidence, options, paper_abstract=paper_abstract
+                )
                 if not body:
                     body = f"（{role} — 未能生成）"
             section_md = f"## {name}\n\n{body.rstrip()}\n"
@@ -446,13 +449,15 @@ class WriterAgent(BaseAgent):
         analysis: PaperAnalysis,
         evidence: EvidenceMap,
         options: dict,
+        paper_abstract: str = "",
     ) -> str:
         """LLM 失败时用 abstract + paper_analysis 拼一段降级正文，至少不是空架子。
 
-        评审 1 暴露的"占位符泄漏"问题的根本防御：哪怕 writer LLM 全程失败，
-        pipeline 仍能产出一篇基于 abstract 的最低质量文章，不是 `(xx)` 模板。
+        评审 1 + 2026-09-03 probe 验证：reader 经常 LLM empty response，paper_analysis
+        全空 → fallback 也没东西。修复：优先用 paper.abstract（parser 永远有 1500 字符），
+        然后才退到 analysis 字段。
         """
-        abstract = (analysis.research_question or "").strip()
+        abstract = (paper_abstract or analysis.research_question or "").strip()
         if not abstract:
             return ""
         # 8 个 section 中，01/02/05/06/08 这 5 个最能从 abstract 凑出内容

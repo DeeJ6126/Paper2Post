@@ -32,26 +32,23 @@ class ReviewerAgent(BaseAgent):
         article: str,
     ) -> FactCheck:
         draft = self._draft()
-        # evidence 全 dump 可能 2-3KB；截到前 5 条 + 每条 200 字符
-        compact_evidence = {
-            "evidence": [
-                {
-                    "claim": (e.claim or "")[:200],
-                    "source_section": (e.source_section or "")[:60],
-                    "figure": (e.figure or "")[:60],
-                }
-                for e in (evidence.evidence or [])[:5]
-                if (e.claim or "").strip()
-            ]
-        }
-        user = self.dump(
-            {
-                # article 截到 2KB 防止 vision 模型空响应。Reviewer 重点核验
-                # 前 1-2 段（hook、why important、findings），再长边际收益低。
-                "article": article[:2000],
-                "evidence": compact_evidence,
-                "paper_summary": (paper.abstract or "")[:1000],
-            }
+        # 纯文本 user payload（避免 deepseek-v4-flash 在 JSON user 上的空响应问题）
+        ev_lines = []
+        for e in (evidence.evidence or [])[:5]:
+            if not (e.claim or "").strip():
+                continue
+            ev_lines.append(f"- claim: {e.claim[:200]}")
+            if e.source_section:
+                ev_lines.append(f"  source: {e.source_section[:60]}")
+            if e.figure:
+                ev_lines.append(f"  figure: {e.figure[:60]}")
+        user = (
+            "## 待审核文章（≤2000 字）\n"
+            f"{article[:2000]}\n\n"
+            "## 论文摘要\n"
+            f"{(paper.abstract or '')[:1000]}\n\n"
+            "## 证据\n"
+            + ("\n".join(ev_lines) if ev_lines else "（无）")
         )
         data = generate_json(
             self.llm,

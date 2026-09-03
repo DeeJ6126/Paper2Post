@@ -67,12 +67,20 @@ class EditorAgent(BaseAgent):
             ],
         }
 
-        user = self.dump(
-            {
-                "draft_article": safe_article,
-                "fact_check": compact_fc,
-                "options": {k: v for k, v in (options or {}).items() if k in ("language", "style", "target_audience")},
-            }
+        # 纯文本 user payload（避免 deepseek-v4-flash 在 JSON user 上的空响应问题）
+        opts = {k: v for k, v in (options or {}).items() if k in ("language", "style", "target_audience")}
+        opt_text = "\n".join(f"- {k}: {v}" for k, v in opts.items()) or "（默认）"
+        issues_text = "\n".join(
+            f"- [{getattr(i, 'severity', '')}] {getattr(i, 'claim', '')[:150]} → 建议：{(getattr(i, 'suggestion', '') or '')[:150]}"
+            for i in (factcheck.issues or [])[:5]
+        ) or "（无）"
+        user = (
+            f"## 待编辑文章（≤3000 字）\n{safe_article}\n\n"
+            f"## 事实核验\n"
+            f"- overall_score: {factcheck.overall_score}\n"
+            f"- passed: {factcheck.passed}\n"
+            f"- issues:\n{issues_text}\n\n"
+            f"## 编辑选项\n{opt_text}"
         )
         text = self.llm.chat(
             system=self.prompts.editor,

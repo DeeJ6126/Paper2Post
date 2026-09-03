@@ -8,11 +8,14 @@ from typing import Any, Dict, Optional
 from .base import LLMProvider, LLMError
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-# 文本优先：vision 在 6KB+ 输入下空响应。flash 是当前 Pipeline 真正稳定的模型。
+# 2026-09-03：openai SDK 在 DeepSeek 上频繁 hang（httpx 连接池怪行为）。
+# 改用 plain requests 后 flash 完全可用（4-13s）。Pipeline 默认继续用 flash。
+# pro / reasoner 保留在模型列表里供用户切换。
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
 DEEPSEEK_MODELS = [
     DEEPSEEK_DEFAULT_MODEL,
     "deepseek-v4-pro",
+    "deepseek-reasoner",
     "deepseek-v4-flash-vision-exp",
 ]
 

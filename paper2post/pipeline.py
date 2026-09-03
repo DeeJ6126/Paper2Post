@@ -89,11 +89,13 @@ class Pipeline:
         # ---- 1. 解析 PDF ----
         paper: ParsedPaper = parse_pdf(pdf_path, figures_dir=fig_dir if save_figures else None)
 
-        # 双 LLM 策略：reader/writer/reviewer/editor 走 text_model（flash 文本任务更稳），
-        # figure_agent 走 self.llm（vision 必须）。text_model 在 options / settings 里可配。
+        # 单 LLM 策略：text_model_name 用于 reader/writer/storyteller/reviewer/editor，
+        # figure_agent 走 self.llm（vision 必须）。text_model 在 options / settings 里可配，
+        # 默认 deepseek-v4-flash。
         text_model_name = (
             options.get("text_model")
             or self.settings.get("text_model")
+            or "deepseek-v4-flash"
         )
         text_llm = self.llm
         if text_model_name and text_model_name != getattr(self.llm, "model", None):

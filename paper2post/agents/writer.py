@@ -119,6 +119,84 @@ class WriterAgent(BaseAgent):
             lines.append("")
         return "\n".join(lines)
 
+    def _format_user_as_text(
+        self,
+        section_name: str,
+        section_role: str,
+        analysis: PaperAnalysis,
+        evidence: EvidenceMap,
+        figures: List[FigureAnalysis],
+        previous_sections: List[str],
+        options: dict,
+    ) -> str:
+        """把 section 调用 payload 渲染成纯 Markdown 文本。
+
+        关键发现（2026-09-03 probe）：deepseek-v4-flash 对 JSON 格式的 user prompt
+        会卡 14s 后返回空字符串（疑似 content filter / tokenization 触发）。
+        同样的内容用纯文本 / Markdown 格式就 10s 内返回 800+ 字符。
+        改用纯文本 prompt 后 writer per-section 终于能产出实际内容。
+        """
+        a = _compact_analysis(analysis)
+        ev = _compact_evidence(evidence)
+        figs = _compact_figures(figures)
+        lines = [
+            f"## 当前 section: {section_name}",
+            f"（{section_role}）",
+            "",
+            "## 论文信息",
+            f"- 标题：{a.get('title', '')}",
+            f"- 研究问题：{a.get('research_question', '')}",
+            f"- 知识空白：{a.get('knowledge_gap', '')}",
+            f"- 假设：{a.get('hypothesis', '')}",
+            f"- 结论：{a.get('authors_conclusion', '')}",
+        ]
+        bg = a.get('background', [])
+        if bg:
+            lines.append("- 背景：")
+            for b in bg:
+                lines.append(f"  - {b}")
+        methods = a.get('methods', [])
+        if methods:
+            lines.append("- 方法：")
+            for m in methods:
+                lines.append(f"  - {m}")
+        findings = a.get('main_findings', [])
+        if findings:
+            lines.append("- 主要发现：")
+            for f in findings:
+                lines.append(f"  - {f.get('finding', '')}（重要性：{f.get('importance', 'medium')}）")
+        inn = a.get('innovation', [])
+        if inn:
+            lines.append("- 创新点：")
+            for x in inn:
+                lines.append(f"  - {x}")
+        lim = a.get('limitations', [])
+        if lim:
+            lines.append("- 局限：")
+            for x in lim:
+                lines.append(f"  - {x}")
+        if ev:
+            lines.append("")
+            lines.append("## 证据")
+            for e in ev:
+                lines.append(f"- {e.get('claim', '')}（来源：{e.get('source_section', '')}）")
+        if figs:
+            lines.append("")
+            lines.append("## 可用图")
+            for f in figs:
+                lines.append(f"- {f.get('figure', '')}（{f.get('role', '')}）：{f.get('summary', '')}")
+        if previous_sections:
+            lines.append("")
+            lines.append("## 已有上文（避免重复，保持语气一致）")
+            for ps in previous_sections[-2:]:
+                lines.append(ps[:400] + ("…" if len(ps) > 400 else ""))
+        lines.append("")
+        lines.append("## 目标")
+        lines.append(f"- 语言：{options.get('language', 'zh-CN')}")
+        lines.append(f"- 受众：{options.get('target_audience', 'biology_graduate')}")
+        lines.append("- 长度：500-800 字")
+        return "\n".join(lines)
+
     def _call_section_llm(
         self,
         section_name: str,
@@ -130,17 +208,10 @@ class WriterAgent(BaseAgent):
         options: dict,
     ) -> str:
         """单节 LLM 调用。返回 markdown 字符串。"""
-        user_payload = {
-            "section_name": section_name,
-            "section_role": section_role,
-            "analysis": _compact_analysis(analysis),
-            "evidence": _compact_evidence(evidence),
-            "figures": _compact_figures(figures),
-            "previous_sections": previous_sections[-2:] if previous_sections else [],
-            "target_language": options.get("language", "zh-CN"),
-            "target_audience": options.get("target_audience", "biology_graduate"),
-        }
-        user = self.dump(user_payload)
+        user = self._format_user_as_text(
+            section_name, section_role, analysis, evidence, figures,
+            previous_sections, options,
+        )
         text = self.llm.generate(
             system=self.prompts.writer_section,
             user=user,
@@ -164,6 +235,59 @@ class WriterAgent(BaseAgent):
             t = t[m.end():].lstrip("\n").lstrip()
         return t
 
+    def _call_oneshot_llm(
+        self,
+        analysis: PaperAnalysis,
+        evidence: EvidenceMap,
+        figures: List[FigureAnalysis],
+        options: dict,
+    ) -> str:
+        """1 次 LLM 调用写完整篇文章。避开 8 sections × 多次空响应的累计风险。
+
+        输出 ~6000 token 中文（8 sections × 700 字符）。max_tokens 6000 给 vision 也会卡，
+        改用 flash 模型输出 6000 token（如果用 vision 模型则用 5000 上限）。
+        """
+        user_payload = {
+            "sections": [{"name": n, "role": r} for n, r in DEFAULT_SECTIONS],
+            "analysis": _compact_analysis(analysis),
+            "evidence": _compact_evidence(evidence),
+            "figures": _compact_figures(figures),
+            "target_language": options.get("language", "zh-CN"),
+            "target_audience": options.get("target_audience", "biology_graduate"),
+        }
+        user = self.dump(user_payload)
+        # flash 模型输出 6000 token OK；vision 模型输出 ~1500 token 安全
+        is_vision = bool(getattr(self.llm, "supports_vision", lambda: False)())
+        text = self.llm.generate(
+            system=self.prompts.writer_section + "\n\n## 一次性写完整篇\n一次性输出 8 个 ## section_name 子节，每节 500-800 字中文 Markdown。**严格按顺序写所有 sections**，不要省略。",
+            user=user,
+            temperature=self.temperature(),
+            max_tokens=1500 if is_vision else 6000,
+        )
+        return (text or "").strip()
+
+    def _split_oneshot_to_sections(self, text: str) -> dict:
+        """把 oneshot 全文按 '## 01 xxx' / '## 02 xxx' 等标题切成 sections。"""
+        sections = {}
+        if not text:
+            return sections
+        # 找所有 "## N " 标题位置
+        import re
+        pattern = re.compile(r"^##\s*(\d+)\s+(.+)$", re.M)
+        matches = list(pattern.finditer(text))
+        if not matches:
+            return sections
+        for i, m in enumerate(matches):
+            num = m.group(1)
+            title = m.group(2).strip()
+            # 名字去掉末尾的中文标点和数字等做归一化
+            content_start = m.end()
+            content_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            content = text[content_start:content_end].strip()
+            # 用 num + title 一起做 key
+            sections[f"{num} {title}"] = content
+        return sections
+
     def run(
         self,
         analysis: PaperAnalysis,
@@ -175,30 +299,24 @@ class WriterAgent(BaseAgent):
         if self.llm.is_mock:
             return self._mock_draft(analysis, evidence, storyline, figures, options)
 
-        # 逐节写
+        # 逐节 LLM 调用：每节 1 次小调用，max_tokens 1200，flash 模型稳定
+        # 经验（2026-09-03）：oneshot 6000 token 调用 deepseek-v4-flash 在 writer payload 下
+        # 20s timeout 不够，模型生成 6000 token 速度跟不上；改回逐节 8 × 1200 token。
         written: List[str] = [f"# {analysis.title or 'Untitled paper'}"]
-        previous_bodies: List[str] = []
         for name, role in DEFAULT_SECTIONS:
             try:
                 text = self._call_section_llm(
-                    section_name=name,
-                    section_role=role,
-                    analysis=analysis,
-                    evidence=evidence,
-                    figures=figures,
-                    previous_sections=previous_bodies,
-                    options=options,
+                    section_name=name, section_role=role,
+                    analysis=analysis, evidence=evidence, figures=figures,
+                    previous_sections=written[-2:], options=options,
                 )
             except Exception:
                 text = ""
             body = self._extract_section_body(text, name)
             if not body:
-                # 兜底：占位文字
                 body = f"（{role}）"
             section_md = f"## {name}\n\n{body.rstrip()}\n"
             written.append(section_md)
-            # 把可用的 body 喂给下一节（去除 markdown 标记）
-            previous_bodies.append(re.sub(r"[#*`>\[\]]", "", body)[:400])
 
         # 论文信息 footer
         journal = analysis.journal or ""

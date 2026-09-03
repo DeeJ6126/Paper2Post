@@ -121,13 +121,17 @@ class ReaderAgent(BaseAgent):
 
         temperature 用 0.2 强制 JSON 稳定：vision 模型 + 长 prompt 下 0.7 经常
         在字符串里加多余引号导致 JSON parse 失败。
+
+        关键（2026-09-03 probe）：deepseek-v4-flash 对 JSON 格式的 user prompt
+        会卡 14s 后返回空字符串。改用纯文本 / Markdown 格式即可 10s 内返回。
+        输出端 response_format 仍然强约束 JSON，所以 model 还是按 JSON 输出。
         """
-        user = self.dump(
-            {
-                "section_index": idx,
-                "heading": heading,
-                "text": text[:SECTION_TEXT_LIMIT],
-            }
+        # 纯文本 user payload（不再用 JSON dict）
+        truncated = (text or "")[:SECTION_TEXT_LIMIT]
+        user = (
+            f"## 第 {idx} 节\n"
+            f"标题：{heading}\n\n"
+            f"## 原文（≤{SECTION_TEXT_LIMIT} 字）\n{truncated}"
         )
         data = generate_json(
             self.llm,

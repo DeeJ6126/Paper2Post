@@ -121,7 +121,7 @@ def parse_json(text: str) -> Any:
     end_bracket = t.rfind("]")
     end = max(end_brace, end_bracket)
     if start == -1 or end == -1 or end <= start:
-        raise
+        raise ValueError("no JSON object/array found in LLM response")
     return json.loads(_sanitize_json_text(t[start : end + 1]))
 
 

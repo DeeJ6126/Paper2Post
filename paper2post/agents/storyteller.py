@@ -84,7 +84,24 @@ class StorytellerAgent(BaseAgent):
 
     def run(self, analysis: PaperAnalysis, evidence: EvidenceMap, mode: str) -> Storyline:
         draft = self._draft(analysis, mode)
-        user = self.dump(_compact_for_storyteller(analysis, evidence) | {"mode": mode})
+        # 纯文本 user payload（避免 deepseek-v4-flash 在 JSON user 上的空响应问题）
+        comp = _compact_for_storyteller(analysis, evidence)
+        a = comp.get("analysis", {})
+        evs = comp.get("evidence", [])
+        ev_text = "\n".join(f"- {e.get('claim', '')}（来源：{e.get('source_section', '')}）" for e in evs) or "（无）"
+        user = (
+            f"## 模式\n{mode}\n\n"
+            f"## 论文标题\n{a.get('title', '')}\n\n"
+            f"## 研究问题\n{a.get('research_question', '')}\n\n"
+            f"## 知识空白\n{a.get('knowledge_gap', '')}\n\n"
+            f"## 假设\n{a.get('hypothesis', '')}\n\n"
+            f"## 作者结论\n{a.get('authors_conclusion', '')}\n\n"
+            f"## 背景\n" + ("\n".join(f"- {x}" for x in a.get("background", [])) or "（无）") + "\n\n"
+            f"## 方法\n" + ("\n".join(f"- {x}" for x in a.get("methods", [])) or "（无）") + "\n\n"
+            f"## 主要发现\n" + ("\n".join(f"- {f.get('finding', '')}（{f.get('importance', 'medium')}）" for f in a.get("main_findings", [])) or "（无）") + "\n\n"
+            f"## 创新点\n" + ("\n".join(f"- {x}" for x in a.get("innovation", [])) or "（无）") + "\n\n"
+            f"## 证据\n{ev_text}"
+        )
         data = generate_json(
             self.llm,
             system=self.prompts.storyteller,

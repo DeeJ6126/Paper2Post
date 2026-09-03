@@ -1,21 +1,29 @@
-"""OpenAI 兼容 Provider。
+"""OpenAI 兼容 Provider（plain requests 实现）。
 
-默认支持官方 API；通过 base_url 也可接入任意 OpenAI 兼容端点
-（代理、本地 vLLM、Ollama 等）。
+历史：2026-09-03 probe 发现 openai SDK + httpx 在 DeepSeek API 上**频繁 hang**——
+timeout=20s 也救不回来，单次调用能挂 60s+。改用 `requests` 直接 POST，绕过 httpx 的
+连接池 / keepalive 怪行为，flash 4-13s 就能返回。
+
+设计要点：
+- 单例 `requests.Session` 全局复用（keep-alive）
+- 单次 `requests.post(..., timeout=N)` 严格按 N 秒截断
+- 空响应 / 网络错误时 1 次内部 retry（backoff 0.5s）
+- vision 用独立临时 Session（避免大图 block 文本请求）
 """
-
 from __future__ import annotations
 
 import base64
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+
+import requests
 
 from .base import LLMProvider, LLMError
 
 
 # Vision 模型白名单：只有这些模型名才会被允许调用 analyze_image。
-# DeepSeek 当前只支持 deepseek-v4-flash-vision-exp。
 _VISION_MODEL_ALLOWLIST = {
     "deepseek-v4-flash-vision-exp",
     "deepseek-vl", "deepseek-vl2",
@@ -30,7 +38,6 @@ def _is_vision_model(model: str) -> bool:
         return False
     if name in _VISION_MODEL_ALLOWLIST:
         return True
-    # 启发式：名字里含 vision / vl / multimodal
     return any(kw in name for kw in ("vision", "-vl", "multimodal"))
 
 
@@ -53,7 +60,6 @@ def _image_to_data_url(path: Union[str, Path]) -> str:
     if not mime:
         raise LLMError(f"unsupported image format: {ext}（支持 PNG/JPEG/GIF/WebP）")
     raw = p.read_bytes()
-    # 32MB 单图 base64 上限（DeepSeek vision 限制）
     if len(raw) > 32 * 1024 * 1024:
         raise LLMError(f"image too large: {len(raw)/1024/1024:.1f}MB (max 32MB)")
     b64 = base64.b64encode(raw).decode("ascii")
@@ -62,40 +68,39 @@ def _image_to_data_url(path: Union[str, Path]) -> str:
 
 # vision 模型不应该用 response_format 硬约束（经验：会偶发空响应）；
 # flash / pro 等纯文本模型则应该用，提升 JSON 稳定性。
-_VISION_MODEL_HINT_KEYWORDS = ("vision", "-vl", "multimodal")
-
-
 def _should_use_json_response_format(model: str) -> bool:
-    """vision 模型不用 response_format；其它模型用。"""
     name = (model or "").lower()
     if not name:
         return False
-    if any(kw in name for kw in _VISION_MODEL_HINT_KEYWORDS):
+    if any(kw in name for kw in ("vision", "-vl", "multimodal")):
         return False
     return True
 
 
 def _is_retriable_error(exc: Exception) -> bool:
     """判断异常是否值得重试。配置错误 / 客户端错误 4xx 都不重试。"""
-    # 我们的 LLMError：image not found / format / 太大 / 配置错 / model 不支持 vision
     name = exc.__class__.__name__
     if name in ("LLMError",):
         msg = str(exc).lower()
-        # 4xx 类配置错误
         if any(k in msg for k in (
             "not found", "unsupported", "未设置", "not support", "too large",
             "未配置", "invalid api key", "unauthorized",
         )):
             return False
-    # OpenAI SDK 异常分类
-    full_name = f"{exc.__class__.__module__}.{exc.__class__.__name__}"
-    if "AuthenticationError" in full_name or "PermissionDeniedError" in full_name:
-        return False
-    if "BadRequestError" in full_name:  # 400 不重试（prompt 错了重试也没用）
-        return False
-    if "NotFoundError" in full_name:  # 404 模型不存在
-        return False
     return True
+
+
+# 全局 Session（keep-alive），单例复用。
+_SESSION: Optional[requests.Session] = None
+
+
+def _get_session() -> requests.Session:
+    global _SESSION
+    if _SESSION is None:
+        s = requests.Session()
+        # 不设默认 timeout，强制每个调用显式传
+        _SESSION = s
+    return _SESSION
 
 
 class OpenAIProvider(LLMProvider):
@@ -108,8 +113,10 @@ class OpenAIProvider(LLMProvider):
         api_key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY")
         base_url = cfg.get("base_url") or os.environ.get("OPENAI_BASE_URL")
         self.model = cfg.get("model") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
-
-        if not api_key:
+        self.api_key = api_key
+        self.base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self.timeout = float(cfg.get("timeout", 25.0))  # 默认 25s 文本/JSON 调用
+        if not self.api_key:
             raise LLMError(
                 "OPENAI_API_KEY 未设置。请:\n"
                 "  1) copy .env.example .env 并填入密钥;\n"
@@ -117,20 +124,37 @@ class OpenAIProvider(LLMProvider):
                 "  3) 或在 config 中传入 api_key。"
             )
 
-        try:
-            from openai import OpenAI
-        except ImportError as exc:  # pragma: no cover
-            raise LLMError("未安装 openai 包，请 pip install openai") from exc
-
-        kwargs: Dict[str, Any] = {
-            "api_key": api_key,
-            "timeout": float(cfg.get("timeout", 15.0)),  # 默认 15s（之前 30s 太长，重复 timeout 浪费 90s）
-            "max_retries": 0,  # 由本类 generate() 统一做重试，避免双重 retry 把单次延迟放大
+    # ---- helpers ----
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
         }
-        if base_url:
-            kwargs["base_url"] = base_url
-        self.client = OpenAI(**kwargs)
 
+    def _post_chat(
+        self,
+        payload: Dict[str, Any],
+        *,
+        timeout: Optional[float] = None,
+    ) -> str:
+        """直接 POST 到 /chat/completions，返回 message.content。
+
+        失败抛 LLMError（或 requests.RequestException），由调用方决定是否重试。
+        """
+        url = f"{self.base_url}/chat/completions"
+        sess = _get_session()
+        t = timeout if timeout is not None else self.timeout
+        resp = sess.post(url, json=payload, headers=self._headers(), timeout=t)
+        if resp.status_code >= 400:
+            # 4xx 不重试（配置/请求问题）
+            raise LLMError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        return (choices[0].get("message") or {}).get("content") or ""
+
+    # ---- main entry ----
     def generate(
         self,
         *,
@@ -140,35 +164,44 @@ class OpenAIProvider(LLMProvider):
         max_tokens: Optional[int] = None,
         json_mode: bool = False,
     ) -> str:
-        params: Dict[str, Any] = {
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        payload: Dict[str, Any] = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            "messages": messages,
             "temperature": temperature,
         }
         if max_tokens:
-            params["max_tokens"] = max_tokens
+            payload["max_tokens"] = max_tokens
         elif _is_vision_model(self.model):
             # vision 模型默认不限制输出 token 容易空响应；强制 600 上限。
-            params["max_tokens"] = 600
-        # response_format 区分：vision 模型**不**设（经验：在硬约束下偶发空响应），
-        # flash / pro 等纯文本模型设上以提升 JSON 稳定性。
+            payload["max_tokens"] = 600
         if json_mode and _should_use_json_response_format(self.model):
-            params["response_format"] = {"type": "json_object"}
+            payload["response_format"] = {"type": "json_object"}
 
-        # 单次 HTTP 调用，失败立刻返回。retry 在上层（base.py 1 次）和外层。
-        # 经验：keep-alive 连接被服务端 idle timeout 断开后，retry 同大小 payload
-        # 经常再等 15s。**单次 + 立即 fallback** 最快。
-        try:
-            resp = self.client.chat.completions.create(**params)
-            text = resp.choices[0].message.content or ""
-            return text if text.strip() else ""
-        except Exception:
+        # 内部 1 次 retry 兜底：单次 25s × 2 = 50s worst case。
+        # 经验：flash 大部分调用 1-15s 就成功；偶尔 1 次空响应 / 慢响应。
+        last_err: Optional[Exception] = None
+        for attempt in (1, 2):
+            try:
+                text = self._post_chat(payload, timeout=self.timeout).strip()
+                if text:
+                    return text
+            except LLMError:
+                # 4xx / 配置错误：不再重试
+                raise
+            except Exception as e:
+                last_err = e
+            if attempt == 1:
+                time.sleep(0.5)
+        if last_err is not None:
+            # 静默失败：把错误留给上层 base.generate_json 打印
             return ""
+        return ""
 
-    # ---------- vision ----------
+    # ---- vision ----
     def supports_vision(self) -> bool:
         return _is_vision_model(self.model)
 
@@ -182,27 +215,12 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int = 600,
         timeout: Optional[float] = 8.0,
     ) -> str:
-        """Vision 视觉理解：把本地图片 base64 内联后随 prompt 调一次 LLM。
-
-        要求模型必须在白名单内（vision-capable），否则抛 LLMError。
-        返回模型对图的纯文本描述；失败/空响应时返回 ""，由调用方兜底。
-
-        单图 timeout 默认 8s：8 张图 × 8s = 64s worst，配合 2 worker 并行 = 32s worst。
-        """
         if not self.supports_vision():
             raise LLMError(
                 f"当前模型 {self.model} 不支持 vision。请切换到 deepseek-v4-flash-vision-exp 或其他视觉模型。"
             )
         data_url = _image_to_data_url(image_path)
-        # 单图调用使用独立更短 timeout 的 client
-        from openai import OpenAI
-        one_client = OpenAI(
-            api_key=self.client.api_key,
-            timeout=float(timeout) if timeout else 8.0,
-            max_retries=0,
-            base_url=str(self.client.base_url) if self.client.base_url else None,
-        )
-        params: Dict[str, Any] = {
+        payload = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
@@ -217,10 +235,8 @@ class OpenAIProvider(LLMProvider):
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        # 单图只调 1 次，超时立刻返回 ""
         try:
-            resp = one_client.chat.completions.create(**params)
-            text = resp.choices[0].message.content or ""
-            return text.strip() if text.strip() else ""
+            text = self._post_chat(payload, timeout=timeout or 8.0).strip()
+            return text
         except Exception:
             return ""

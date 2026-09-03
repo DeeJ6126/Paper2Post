@@ -27,9 +27,9 @@ CORE_SECTIONS = ("abstract", "introduction", "methods", "results", "discussion",
 # 辅助 sections（不是核心叙事，跳过）
 SKIP_SECTIONS = ("supplementary", "references", "acknowledgements", "appendix")
 
-# 单 section 文本上限。100K+ 的 section (DeepGGL Methods) 喂 LLM 必然超时，
-# 12KB 是给 LLM 看的足够上下文，剩余留给 figure / abstract 兜底。
-MAX_SECTION_TEXT = 12_000
+# 单 section 文本上限。大论文 24KB 平衡：context window（vision / flash 仍 6KB+ 安全）
+# + 12KB 不够（DeepGGL Methods 137K 截后看不到核心）→ 24KB。
+MAX_SECTION_TEXT = 24_000
 
 
 def _read_text(doc) -> str:
@@ -49,18 +49,28 @@ def _extract_title(doc, metadata: dict, full_text: str) -> str:
 
 
 def _extract_abstract(full_text: str) -> str:
-    """按 Abstract 标题切分，提取摘要正文。限制 2000 字符防误判（如 DeepGGL abstract=93K）。"""
-    m = re.search(r"(?im)^\s*(abstract|summary)\b[.:\s]*", full_text)
-    if not m:
-        return ""
-    start = m.end()
-    # 找到下一个疑似小节/段落边界
-    tail = full_text[start:]
-    nxt = re.search(
-        r"(?im)^\s*(introduction|keywords|1\.\s|introduction\b)", tail
-    )
-    end = nxt.start() if nxt else 2000
-    return tail[:end].strip()[:3000]
+    """智能 abstract 提取。
+
+    关键改进（大论文 root cause）：
+    1. AlphaGenome PDF 解析没匹配到 "Abstract" heading → fallback 取全文前 1500 字符
+    2. DeepGGL 把正文当 abstract（93K）→ 限制 3000 字符 + 用 abstract heading 精确切分
+    3. abstract 缺失/异常时 → 启发式取全文首段（"## Abstract"之前的前 N 字符）
+    """
+    # 优先按 abstract heading 切分
+    m = re.search(r"(?im)^\s*(?:abstract|summary)\b[.:\s]*", full_text)
+    if m:
+        start = m.end()
+        tail = full_text[start:]
+        nxt = re.search(
+            r"(?im)^\s*(?:introduction|keywords|1\.\s|background)\b", tail
+        )
+        end = nxt.start() if nxt else 2000
+        return tail[:end].strip()[:3000]
+    # Fallback 1：取前 1500 字符作为 abstract（AlphaGenome 这种 heading 缺失的）
+    head = full_text.strip()[:1500]
+    if head:
+        return head
+    return ""
 
 
 def split_sections(full_text: str) -> List[PaperSection]:

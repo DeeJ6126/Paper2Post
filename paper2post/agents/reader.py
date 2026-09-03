@@ -337,19 +337,23 @@ class ReaderAgent(BaseAgent):
 
         # 启发式 fallback：当 section notes 没显式提供时，从 claims 里抓
         if not gaps:
+            # 关键改进：去掉 "difficult"（会被 "differential" 误匹配）、"challenge"
+            # （会被 "challen" 误匹到 differential） 等太宽的词
             gap_keywords = ("未解决", "尚未", "缺乏", "空白", "不足", "未充分", "未知的",
-                            "remained", "lacking", "unresolved", "unknown", "gap", "limitation",
-                            "however", "but", "challenge", "limitation", "difficult")
+                            "remained unclear", "remains unknown", "lacking", "unresolved",
+                            "open question", "limitation",
+                            "however,", "but ", "yet ", "although ")
             for n in notes:
                 role = n.get("role", "unknown")
                 if role in ("background", "introduction", "related_work", "discussion", "abstract"):
                     for c in n.get("claims", []):
-                        if any(kw in c.lower() for kw in gap_keywords):
+                        cl = c.lower()
+                        if any(kw in cl for kw in gap_keywords):
                             gaps.append(c)
                             break
                 if gaps:
                     break
-            # 终极兜底：abstract 倒数第一句（论文 abstract 末尾常含"however"等过渡）
+            # 终极兜底：abstract 倒数第一句
             if not gaps and paper.abstract:
                 sents = [s.strip() for s in paper.abstract.replace("。", "。\n").replace(".", ".\n").split("\n") if s.strip() and len(s.strip()) > 12]
                 if sents:
@@ -357,7 +361,6 @@ class ReaderAgent(BaseAgent):
                     if any(kw in last.lower() for kw in ("however", "but", "yet", "although", "remain", "challenge", "limitation")):
                         gaps.append(last)
                     else:
-                        # 仍然没关键词，强制用 abstract 末 1 句（不做字面 placeholder）
                         gaps.append(last)
 
         if not hypotheses:
@@ -407,9 +410,15 @@ class ReaderAgent(BaseAgent):
                     conclusions.append(sents[-1][:300])
 
         if not all_innovations:
-            innovation_keywords = ("首次", "新", "原创", "创新", "novel", "first", "new approach",
-                                   "we present", "we introduce", "we develop", "we propose",
-                                   "we design", "we build", "lightweight", "compact")
+            # 启发式关键词扩展（大论文 root cause）：技术论文"novel"标志词
+            # 比通用关键词更广，加入 allow / efficient / achieve / demonstrate 等
+            innovation_keywords = (
+                "首次", "新", "原创", "创新", "novel", "first", "new approach",
+                "we present", "we propose", "we introduce", "we develop", "we propose",
+                "we design", "we build", "we show", "we demonstrate", "we achieve",
+                "enables", "allows", "allows for",
+                "本文", "我们提出", "本工作",
+            )
             for n in notes:
                 role = n.get("role", "unknown")
                 if role in ("abstract", "introduction", "background", "methods"):

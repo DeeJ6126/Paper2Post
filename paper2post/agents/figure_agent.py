@@ -175,6 +175,26 @@ class FigureAgent(BaseAgent):
             except Exception:
                 return (i, "")
 
+        # 2026-09-03 评审 1 暴露：vision 模型返回"纯黑色矩形图像，无法判断图表类型"等
+        # placeholder 文字被原样塞进 figure summary，正文 writer 不知道图是"看不到的"，
+        # 就硬描述图里画了什么（"散点图和密度等高线"）— 实质是 hallucinate 视觉内容。
+        # 防御：vision 描述如果是 placeholder / 长度太短 / 关键词触发"看不见"，标记为
+        # [无视觉描述]，让 writer 知道不能扩展视觉细节。
+        _VISION_PLACEHOLDER_HINTS = (
+            "纯黑色", "纯白色", "无法判断", "看不到", "无法识别", "无法看清",
+            "占位符", "待补充", "无视觉", "未识别", "无法描述", "无法提取",
+            "黑色矩形", "白色矩形", "all black", "all white",
+        )
+
+        def _is_placeholder_vision(desc: str) -> bool:
+            d = (desc or "").strip()
+            if not d:
+                return True
+            if len(d) < 8:  # 太短
+                return True
+            low = d.lower()
+            return any(h in low for h in _VISION_PLACEHOLDER_HINTS)
+
         with ThreadPoolExecutor(max_workers=4) as ex:
             futures = [ex.submit(_vision_one, i) for i in top_idx]
             for fut in as_completed(futures):
@@ -185,8 +205,15 @@ class FigureAgent(BaseAgent):
                 existing = (fa.summary or "").strip()
                 if "视觉描述" in existing or "【视觉】" in existing:
                     continue
-                if existing:
-                    fa.summary = existing + "\n\n【视觉描述】" + vision_desc
+                if _is_placeholder_vision(vision_desc):
+                    # 不要把 placeholder 描述塞进 summary。改成显式"无视觉描述"标记。
+                    if existing:
+                        fa.summary = existing + "\n\n[无视觉描述 — vision 未能识别该图]"
+                    else:
+                        fa.summary = "[无视觉描述 — vision 未能识别该图]"
                 else:
-                    fa.summary = "【视觉描述】" + vision_desc
+                    if existing:
+                        fa.summary = existing + "\n\n【视觉描述】" + vision_desc
+                    else:
+                        fa.summary = "【视觉描述】" + vision_desc
         return items

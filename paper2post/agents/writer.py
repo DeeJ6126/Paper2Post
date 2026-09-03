@@ -33,14 +33,38 @@ DEFAULT_SECTIONS = [
     ("08 有哪些局限",           "作者承认的不足、当前方法的边界。"),
 ]
 
-# 单节内容长度上限
-SECTION_MAX_TOKENS = 1200
+# 单节内容长度上限（2026-09-03：1200 太短，多篇出现"停在 '而' / 'AF3' / '综合' 截断"；
+# 提到 2000 给 800-1200 字符的输出更多缓冲）
+SECTION_MAX_TOKENS = 2000
 # 输入里 evidence 列表最多保留前 N 条
 # 经验：vision 模型在 ~3KB 输入下稳定；evidence 8×200B=1.6KB 加上其他字段就超。
 # 砍到 3 条保 vision 稳定。flash / pro 等纯文本模型可以更大但当前默认 vision。
 EVIDENCE_KEEP = 3
 # 输入里 figures 列表最多保留前 N 条
 FIGURES_KEEP = 2
+
+# 占位符检测：writer prompt 的 role 描述 / 输出空时的兜底，特征是 "（xxx）" 整段被原样返回。
+# 评审 1 显示 cellreasoner/EMSFold/AI for drug/DiffDock/RSA/Uni-Mol/AlphaFold3/AlphaGenome
+# 都把这种 template 文字直接写进 final_article.md。这里集中拦截。
+_PLACEHOLDER_ROLE_HINTS = (
+    "阐述该论文的领域意义",
+    "该论文要回答的核心科学问题",
+    "研究方法 / 数据集 / 模型框架 / 实验设计",
+    "关键结果，每条 evidence 对应一个 finding",
+    "作者对结果给出的生物学 / 化学 / 物理学解释",
+    "补充实验、跨数据集验证、消融等",
+    "对领域、对下游应用、对临床或产业的影响",
+    "作者承认的不足、当前方法的边界",
+    "（本节",
+    "（详见",
+    "（见原文",
+    "I cannot extract limitations",
+    "I cannot",
+    "I'm sorry",
+)
+
+# 截断检测：段落不以句末标点（。！？…）结尾，且尾字符是中文字符 → 算"中途截断"。
+_END_PUNCT = set("。！？…!?.\n\r")
 
 
 def _short_text(v, limit: int = 200) -> str:
@@ -87,10 +111,23 @@ def _compact_evidence(e: EvidenceMap) -> list:
 
 
 def _compact_figures(figs: List[FigureAnalysis]) -> list:
-    return [
-        {"figure": f.figure, "importance": f.importance, "role": f.role, "summary": _short_text(f.summary, 180)}
-        for f in (figs or [])[:FIGURES_KEEP]
-    ]
+    """压缩图列表 + 给无视觉描述的图打标记，让 writer 知道不能扩展视觉细节。"""
+    out: list = []
+    for f in (figs or [])[:FIGURES_KEEP]:
+        summary = (f.summary or "").strip()
+        has_visual = "【视觉描述】" in summary
+        # 显式无视觉描述（vision 失败被 figure_agent 标了）
+        is_no_visual = ("[无视觉描述" in summary) or (not has_visual and len(summary) < 30)
+        out.append(
+            {
+                "figure": f.figure,
+                "importance": f.importance,
+                "role": f.role,
+                "summary": _short_text(summary, 180) if not is_no_visual else "[无视觉描述 — 仅 caption 可用]",
+                "has_visual": has_visual,
+            }
+        )
+    return out
 
 
 class WriterAgent(BaseAgent):
@@ -184,7 +221,11 @@ class WriterAgent(BaseAgent):
             lines.append("")
             lines.append("## 可用图")
             for f in figs:
-                lines.append(f"- {f.get('figure', '')}（{f.get('role', '')}）：{f.get('summary', '')}")
+                if f.get("has_visual"):
+                    lines.append(f"- {f.get('figure', '')}（{f.get('role', '')}）：{f.get('summary', '')}")
+                else:
+                    # 显式标记"无视觉描述"防止 writer 编造视觉内容
+                    lines.append(f"- {f.get('figure', '')}（{f.get('role', '')}）：[无视觉描述 — 只能引用 caption，不要扩展视觉细节]")
         if previous_sections:
             lines.append("")
             lines.append("## 已有上文（避免重复，保持语气一致）")
@@ -299,22 +340,20 @@ class WriterAgent(BaseAgent):
         if self.llm.is_mock:
             return self._mock_draft(analysis, evidence, storyline, figures, options)
 
-        # 逐节 LLM 调用：每节 1 次小调用，max_tokens 1200，flash 模型稳定
+        # 逐节 LLM 调用：每节 1 次小调用，max_tokens 2000，flash 模型稳定
         # 经验（2026-09-03）：oneshot 6000 token 调用 deepseek-v4-flash 在 writer payload 下
-        # 20s timeout 不够，模型生成 6000 token 速度跟不上；改回逐节 8 × 1200 token。
+        # 20s timeout 不够，模型生成 6000 token 速度跟不上；改回逐节 8 × 2000 token。
+        # 提 1200 → 2000 防"中途停在 '而' / 'AF3' / '综合'" 截断（评审 1 普遍问题）。
         written: List[str] = [f"# {analysis.title or 'Untitled paper'}"]
         for name, role in DEFAULT_SECTIONS:
-            try:
-                text = self._call_section_llm(
-                    section_name=name, section_role=role,
-                    analysis=analysis, evidence=evidence, figures=figures,
-                    previous_sections=written[-2:], options=options,
-                )
-            except Exception:
-                text = ""
-            body = self._extract_section_body(text, name)
+            body = self._generate_section_body(
+                section_name=name, section_role=role,
+                analysis=analysis, evidence=evidence, figures=figures,
+                previous_sections=written[-2:], options=options,
+            )
             if not body:
-                body = f"（{role}）"
+                # 真没救 → 显式标记"模型未能生成"而不是把 role 描述塞进去冒充内容
+                body = f"（{role} — 未能生成）"
             section_md = f"## {name}\n\n{body.rstrip()}\n"
             written.append(section_md)
 
@@ -332,3 +371,68 @@ class WriterAgent(BaseAgent):
         written.append("")
 
         return "\n".join(written)
+
+    def _generate_section_body(
+        self,
+        *,
+        section_name: str,
+        section_role: str,
+        analysis: PaperAnalysis,
+        evidence: EvidenceMap,
+        figures: List[FigureAnalysis],
+        previous_sections: List[str],
+        options: dict,
+    ) -> str:
+        """单节 LLM 调用 + 占位符 / 截断防御。
+
+        评审 1（2026-09-03）暴露 3 个失败模式：
+        1. **占位符泄漏**：LLM 把 `（阐述该论文的领域意义和为什么读者应该关心。）` 这类
+           prompt 模板文字原样返回 → 拦截，重试一次。
+        2. **截断**：段落停在 "而" / "AF3" / "综合" 等中间字 → 拦截，重试一次。
+        3. **meta-disclaimer**：LLM 返回 "I cannot extract limitations" 等元消息 → 拦截，
+           当作空返回，让外层兜底写"未能生成"。
+
+        每次最多 2 次尝试（1 正常 + 1 重试）。仍失败就空，外层用显式占位（不再用 role 描述冒充）。
+        """
+        last_text = ""
+        for attempt in (1, 2):
+            try:
+                text = self._call_section_llm(
+                    section_name=section_name, section_role=section_role,
+                    analysis=analysis, evidence=evidence, figures=figures,
+                    previous_sections=previous_sections, options=options,
+                )
+            except Exception:
+                text = ""
+            last_text = text
+            body = self._extract_section_body(text, section_name)
+            if self._is_bad_body(body, section_role):
+                # 占位符 / 截断 / meta-disclaimer → 重试或放弃
+                if attempt == 1:
+                    import time as _t
+                    _t.sleep(0.3)
+                    continue
+                return ""
+            return body
+        return ""
+
+    @staticmethod
+    def _is_bad_body(body: str, role: str) -> bool:
+        """True 表示 body 是"不可用"：空、占位符模板、截断、meta-disclaimer。"""
+        if not body:
+            return True
+        body_stripped = body.strip()
+        if len(body_stripped) < 60:
+            return True  # 太短，判定为没写出东西
+        # meta-disclaimer / "I cannot" / "I don't have"
+        low = body_stripped.lower()
+        if any(s in low for s in ("i cannot", "i don't have", "i am unable", "i'm sorry", "i can\u2019t")):
+            return True
+        # 占位符模板（prompt role 描述被原样返回）
+        for hint in _PLACEHOLDER_ROLE_HINTS:
+            if hint in body_stripped and len(body_stripped) < 200:
+                return True
+        # 截断：最后 1 个字符是中文/字母且不是句末标点
+        if body_stripped and body_stripped[-1] not in _END_PUNCT:
+            return True
+        return False

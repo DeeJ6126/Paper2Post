@@ -437,17 +437,30 @@ class ReaderAgent(BaseAgent):
                 # 兜底：取 abstract 前 200 字
                 all_innovations = [paper.abstract[:200]]
 
+        # 2026-09-03 评审 1：year 字段全是 "D:20"（PDF metadata.creationDate 截前 4 字符）。
+        # pdf_parser 已经把干净的 year 放在 paper.metadata["year"]，优先用。
+        # journal 同理：用 pdf_parser 抽出的 publisher（即使为空也保留空串，不伪造）。
+        clean_year = (
+            paper.metadata.get("year")
+            or paper.metadata.get("pdf_metadata", {}).get("year")
+            or ""
+        )
+        clean_journal = (
+            paper.metadata.get("publisher")
+            or paper.metadata.get("pdf_metadata", {}).get("publisher")
+            or ""
+        )
         return PaperAnalysis(
             title=paper.title,
-            journal=paper.metadata.get("pdf_metadata", {}).get("publisher", "") or "",
-            year=str(paper.metadata.get("pdf_metadata", {}).get("creationDate", ""))[:4] or "",
+            journal=clean_journal,
+            year=clean_year,
             research_question=self.first_sentence(paper.abstract) or "",
-            background=all_claims[:5] or ["（待补充：研究背景）"],
+            background=all_claims[:5] or [],
             knowledge_gap=(gaps[0] if gaps else _abstract_fallback(paper.abstract, kind="gap")),
             hypothesis=(hypotheses[0] if hypotheses else _abstract_fallback(paper.abstract, kind="hyp")),
-            methods=all_methods[:5] or ["（待补充：研究方法）"],
+            methods=all_methods[:5] or [],
             main_findings=all_findings[:6],
             innovation=(all_innovations[:3] if all_innovations else _abstract_fallback_list(paper.abstract)),
-            limitations=all_limitations[:3] or ["（待补充：局限）"],
+            limitations=all_limitations[:3] or [],
             authors_conclusion=(conclusions[0] if conclusions else _abstract_fallback(paper.abstract, kind="conc")),
         )

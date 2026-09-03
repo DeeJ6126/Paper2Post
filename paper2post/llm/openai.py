@@ -90,16 +90,14 @@ def _is_retriable_error(exc: Exception) -> bool:
     return True
 
 
-# 全局 Session（keep-alive），单例复用。
+# 全局 Session（keep-alive），单例复用。previous 13/13 batch 用这个跑通。
 _SESSION: Optional[requests.Session] = None
 
 
 def _get_session() -> requests.Session:
     global _SESSION
     if _SESSION is None:
-        s = requests.Session()
-        # 不设默认 timeout，强制每个调用显式传
-        _SESSION = s
+        _SESSION = requests.Session()
     return _SESSION
 
 
@@ -115,7 +113,7 @@ class OpenAIProvider(LLMProvider):
         self.model = cfg.get("model") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
         self.api_key = api_key
         self.base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
-        self.timeout = float(cfg.get("timeout", 25.0))  # 默认 25s 文本/JSON 调用
+        self.timeout = float(cfg.get("timeout", 12.0))  # 默认 12s（2026-09-03 观察：DeepSeek flash 偶尔单次 20s+ 不返回，12s 失败快走）
         if not self.api_key:
             raise LLMError(
                 "OPENAI_API_KEY 未设置。请:\n"
@@ -146,7 +144,6 @@ class OpenAIProvider(LLMProvider):
         t = timeout if timeout is not None else self.timeout
         resp = sess.post(url, json=payload, headers=self._headers(), timeout=t)
         if resp.status_code >= 400:
-            # 4xx 不重试（配置/请求问题）
             raise LLMError(f"HTTP {resp.status_code}: {resp.text[:300]}")
         data = resp.json()
         choices = data.get("choices") or []
